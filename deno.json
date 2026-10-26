@@ -3,7 +3,7 @@
   "imports": { "@std/assert": "jsr:@std/assert@1" },
   "tasks": {
     "start": "deno run --allow-net --allow-env --allow-read --allow-write server.ts",
-    "check": "deno check server.ts register.ts sync.ts test/smoke_test.ts test/wow_test.ts",
+    "check": "deno check server.ts register.ts sync.ts test/smoke_test.ts test/wow_test.ts test/live_test.ts",
     "test": "deno test --allow-net --allow-env --allow-read --allow-write test/",
     "sync": "deno run --allow-read --allow-write --allow-run=git --allow-env sync.ts",
     "register": "deno run --allow-net --allow-env register.ts"

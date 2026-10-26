@@ -7,8 +7,9 @@
 // option becomes "@login" (identity.ts), so handlers find their target the
 // same way they do on Twitch.
 //
-// `local` commands (help, settings, the Twitch invite, WoW raids) are
-// answered by the Discord layer itself (interactions.ts, wow.ts) instead.
+// `local` commands (help, settings, the Twitch invite, WoW raids, go-live
+// alerts) are answered by the Discord layer itself (interactions.ts, wow.ts,
+// live.ts) instead.
 //
 // /gs takes any chat command as typed on Twitch ("/gs command:!pog"), so a
 // command the Twitch bot gains reaches Discord with the next sync, before it
@@ -65,6 +66,7 @@ const user = (description = "Who", required = false): Option => ({ name: "user",
 const text = (name: string, description: string, required = false): Option => ({ name, description, required });
 const flag = (name: string, description: string): Option => ({ name, description, type: "boolean" });
 const raid = (): Option => ({ name: "raid", description: "Which raid (start typing its name or number)", type: "integer", required: true, autocomplete: true });
+const streamer = (): Option => ({ name: "streamer", description: "Which streamer (start typing)", required: true, autocomplete: true });
 const WOW_ZONES: Array<[string, string]> = TIMEZONES.map(([label, zone]) => [label, zone]);
 const WOW_SIZES: Array<[string, string]> = [["Party (5)", "5"], ["10", "10"], ["20", "20"], ["25", "25"], ["40", "40"]];
 const slot = (name: string, description: string): Option => ({ name, description, type: "integer", min: 0, max: 40 });
@@ -493,6 +495,28 @@ export const COMMANDS: Command[] = [
           { name: "loot", description: "Record a drop handed out (leader)", options: [raid(), user("Who got it", true), text("item", "e.g. Thunderfury", true)], local: "wow.raid.loot" },
         ],
       },
+    ],
+  },
+
+  // ── Go-live alerts (live.ts) ──
+  {
+    name: "live",
+    description: "Post in a channel when a Twitch streamer goes live",
+    subcommands: [
+      {
+        name: "add",
+        description: "Watch a streamer, or change their alert (moderators)",
+        options: [
+          text("streamer", "Their Twitch name or channel link, e.g. twitch.tv/name", true),
+          { name: "channel", description: "Where the alert goes (default: here)", type: "channel" },
+          { name: "ping", description: "A role to ping, e.g. @Stream Alerts (pick @everyone for everyone)", type: "role" },
+          text("message", "Text above the card: {streamer} {title} {game} {url} (- for the default)"),
+        ],
+        local: "live.add",
+      },
+      { name: "remove", description: "Stop watching a streamer (moderators)", options: [streamer()], local: "live.remove" },
+      { name: "list", description: "Who this server watches, and who's live now", local: "live.list" },
+      { name: "test", description: "Post a streamer's alert now, to see how it looks (moderators)", options: [streamer()], local: "live.test" },
     ],
   },
 

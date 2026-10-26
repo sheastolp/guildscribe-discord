@@ -7,7 +7,8 @@
 //   GET  /health
 // and runs the game's scheduled jobs: autohunt settlement and raid musters
 // every minute, the wandering merchant every 5 minutes, and WoW raid
-// reminders and close-outs (wow.ts) every minute.
+// reminders and close-outs (wow.ts) and Twitch go-live checks (live.ts)
+// every minute.
 //
 // At start-up it registers the slash commands with Discord when commands.ts
 // has changed since the last time (AUTO_REGISTER=0 turns that off), so a
@@ -30,6 +31,7 @@ import { warmFivetools } from "./game/fivetools.ts";
 import runAutohunt from "./game/autohunt_cron.ts";
 import runMerchant from "./game/merchant_cron.ts";
 import { runWowJobs } from "./wow.ts";
+import { runLiveJobs } from "./live.ts";
 import { registrationPayload } from "./commands.ts";
 import { putCommands } from "./discord.ts";
 import { sqlite } from "./game/sqlite.ts";
@@ -139,6 +141,7 @@ if (import.meta.main) {
   every("autohunt_cron", cronMinutes("AUTOHUNT_CRON_MINUTES", 1), () => runAutohunt());
   every("merchant_cron", cronMinutes("MERCHANT_CRON_MINUTES", 5), () => runMerchant());
   every("wow_cron", 1, () => runWowJobs());
+  every("live_cron", 1, () => runLiveJobs());
   registerIfChanged().catch((e) => console.error("command registration failed", e));
   // Download the 5e.tools archive in the background so the first lookup that needs it doesn't wait.
   warmFivetools();

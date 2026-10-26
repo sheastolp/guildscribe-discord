@@ -11,6 +11,7 @@ import { InteractionType, ResponseType, EPHEMERAL, editOriginal, followUp, guild
 import { displayName, loginFor, rememberMember, toDiscordText, toPlainText } from "./identity.ts";
 import { announceChannel, ensureGuild, featureStatus, isSwitchName, setAnnounceChannel, setFeature, switchChoices } from "./guild.ts";
 import { handleWowButton, handleWowCommand, raidChoices } from "./wow.ts";
+import { handleLiveCommand, liveChoices } from "./live.ts";
 import { runGameCommand } from "./router.ts";
 import { runInteraction, setSenders, type Reply } from "./game/scope.ts";
 import { PUBLIC_BASE_URL } from "./game/config.ts";
@@ -79,6 +80,7 @@ function helpText(): string {
     "**Gold** `/gold` `/giveaway` `/bribe` `/gamble` · **Market** `/market` `/haggle` `/stall`",
     "**Tavern talk** `/fun` `/askme` `/quote` · any chat command from the Twitch bot: `/gs`",
     "**World of Warcraft: Forever** `/wow forever` · raids: `/wow raid create` `invite` `list` · `/wow character` `/wow stats` `/wow top`",
+    "**Go-live alerts** `/live list` · moderators: `/live add` `remove` `test`",
     "**Stewards** `/guildscribe status` · `/guildscribe feature` · `/guildscribe channel` · `/twitchinvite`",
   ];
   return lines.join("\n");
@@ -160,8 +162,11 @@ async function handleCommand(interaction: any) {
   }
 
   if (leaf.local) {
+    const channelId = String(interaction.channel_id ?? "");
     const m = leaf.local.startsWith("wow.")
-      ? await handleWowCommand(leaf.local, { guildId, channelId: String(interaction.channel_id ?? ""), userId, display, moderator, a })
+      ? await handleWowCommand(leaf.local, { guildId, channelId, userId, display, moderator, a })
+      : leaf.local.startsWith("live.")
+      ? await handleLiveCommand(leaf.local, { guildId, channelId, userId, moderator, a })
       : await runLocal(leaf.local, { guildId, moderator, a });
     await editOriginal(appId, token, m);
     return;
@@ -177,7 +182,7 @@ async function handleCommand(interaction: any) {
   for (const m of messages.slice(1)) await followUp(appId, token, m);
 }
 
-/** Suggestions while a member types: raid numbers (/wow raid …) and switch names (/guildscribe feature). */
+/** Suggestions while a member types: raid numbers (/wow raid …), watched streamers (/live) and switch names (/guildscribe feature). */
 async function autocomplete(interaction: any): Promise<Array<{ name: string; value: string | number }>> {
   if (!interaction.guild_id) return [];
   const found = resolveInvocation(interaction.data);
@@ -186,6 +191,7 @@ async function autocomplete(interaction: any): Promise<Array<{ name: string; val
   const typed = String(focused.value ?? "");
   try {
     if (found.command.name === "wow" && focused.name === "raid") return await raidChoices(String(interaction.guild_id), typed, found.leaf.name);
+    if (found.command.name === "live" && focused.name === "streamer") return await liveChoices(String(interaction.guild_id), typed);
     if (found.command.name === "guildscribe" && focused.name === "name") return switchChoices(typed).map((n) => ({ name: n, value: n }));
   } catch (e) {
     console.error("autocomplete failed", e);

@@ -6,7 +6,7 @@
 // real reply is filled in afterwards through the interaction's webhook —
 // fights and 5e.tools lookups can take longer than 3 seconds.
 //
-// Posts nobody asked for (merchant ads, autohunt reports, raid launches) and
+// Posts nobody asked for (merchant ads, autohunt reports, raid launches, go-live alerts) and
 // DMs use the bot token, and so do edits to the bot's own posts later on
 // (a WoW raid signup post, wow.ts): an interaction's webhook only lasts 15 minutes.
 
@@ -57,14 +57,20 @@ export interface OutMessage {
   components?: unknown[];
   /** Role IDs this message may ping (a raid post's "@Raiders"). */
   pingRoles?: string[];
+  /** The message may ping @everyone (a go-live alert set to, live.ts). */
+  pingEveryone?: boolean;
   /** Only the member who used the command or button sees it (interaction replies and follow-ups). */
   ephemeral?: boolean;
+}
+
+function allowedMentions(m: OutMessage) {
+  return { parse: m.pingEveryone ? ["everyone"] : [], users: m.ping ?? [], ...(m.pingRoles?.length ? { roles: m.pingRoles } : {}) };
 }
 
 function messageBody(m: OutMessage): BodyInit {
   const payload: Record<string, unknown> = {
     content: m.content.slice(0, 2000),
-    allowed_mentions: { parse: [], users: m.ping ?? [], ...(m.pingRoles?.length ? { roles: m.pingRoles } : {}) },
+    allowed_mentions: allowedMentions(m),
   };
   if (m.ephemeral) payload.flags = EPHEMERAL;
   if (m.embeds) payload.embeds = m.embeds;
@@ -128,7 +134,7 @@ export async function editMessage(channelId: string, messageId: string, m: OutMe
 export function messageData(m: OutMessage, ephemeral = m.ephemeral ?? false) {
   return {
     content: m.content.slice(0, 2000),
-    allowed_mentions: { parse: [], users: m.ping ?? [], ...(m.pingRoles?.length ? { roles: m.pingRoles } : {}) },
+    allowed_mentions: allowedMentions(m),
     ...(m.embeds ? { embeds: m.embeds } : {}),
     ...(m.components ? { components: m.components } : {}),
     ...(ephemeral ? { flags: EPHEMERAL } : {}),

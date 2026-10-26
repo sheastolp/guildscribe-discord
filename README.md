@@ -54,7 +54,8 @@ Discord ──POST /interactions──▶ interactions.ts ──▶ commands.ts 
   command. The merchant starts away.
 - **`server.ts`** runs the endpoint and the public bestiary, treasury and
   gear pages. It also runs the jobs: autohunt settlement, raid musters and
-  WoW raid reminders and close-outs every minute, the merchant every 5. At
+  WoW raid reminders and close-outs and Twitch go-live checks every minute,
+  the merchant every 5. At
   start-up it registers the slash commands if they changed.
 - **`wow.ts`** is Discord's own: WoW: Forever raid signups, invites and
   attendance (see below). The Twitch bot has nothing like it, so it isn't
@@ -79,6 +80,7 @@ fight's uncut battle log comes attached as `battle-log.txt`.
 | Market | `/market on\|off\|status\|now` (moderators) `/haggle` `/stall` |
 | Tavern talk | `/fun coinflip\|flip\|jumble\|dadjoke\|fact\|pic…` `/askme` `/quote random\|show\|count\|add\|edit\|remove` |
 | WoW: Forever | `/wow forever` `/wow raid create\|list\|view\|invite\|edit\|remove\|cancel\|complete\|attendance\|loot` `/wow character` `/wow stats` `/wow top` `/wow timezone` |
+| Go-live alerts | `/live add\|remove\|list\|test` |
 | Anything else | `/gs command:!<any chat command>`: every command the Twitch bot's game answers, typed as on Twitch |
 
 Moderator means **Manage Server**, **Manage Messages** or **Administrator**.
@@ -103,7 +105,7 @@ That's where the Twitch bot checks "broadcaster or mod".
   triggers, timed messages, maps, game stats, NPCs and the chronicle, the
   Endless Delve, overlays, moderation tools, and everything else about Twitch
   chat or streams.
-- **Discord only:** WoW: Forever raid signups (below).
+- **Discord only:** WoW: Forever raid signups and Twitch go-live alerts (below).
 
 ## World of Warcraft: Forever raids
 
@@ -140,6 +142,29 @@ feature, `wow`, on by default.
 - `/wow character name:Thrall class:Shaman role:healer` sets your main,
   shown on rosters. `/wow forever` is the launch countdown, the Twitch
   bot's `!wow:forever`.
+
+## Go-live alerts
+
+`live.ts`. Its own feature, `live`, on by default. A post in a channel when a
+Twitch streamer goes live, like Streamcord's.
+
+- **Watch someone:** `/live add streamer:sheastolp channel:#streams ping:@Stream Alerts`
+  (moderators). `streamer` takes a name or a `twitch.tv/…` link; `ping` can be
+  `@everyone`; `message` is the text above the card, with `{streamer}`,
+  `{title}`, `{game}` and `{url}` (default `🔴 **{streamer}** is live on Twitch! {url}`).
+  Running it again for the same streamer changes their alert. Up to 25 per server.
+- **The post:** a card with the stream's title, game, viewers and a preview,
+  and a **Watch Stream** button. While live it follows title and game changes.
+  When the stream ends it turns grey: "was live", and for how long. A stream
+  that drops and is back within 10 minutes reuses the post, so nobody is
+  pinged twice.
+- `/live list` shows who's watched and who's live; `/live test` posts the
+  alert now; `/live remove` stops it.
+- Twitch is checked every minute, so an alert comes within a minute or so of
+  going live. It needs `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` (the same
+  Twitch app the Twitch bot uses works) and, in the alert channel, Send
+  Messages and Embed Links. To ping `@everyone` the bot also needs Mention
+  Everyone there.
 
 ## Setting it up
 
@@ -240,8 +265,10 @@ also signs a request the way Discord does and runs it through the endpoint,
 and checks posts made outside a command and the three pages.
 `test/wow_test.ts` runs a WoW raid from post to attendance against a fake
 Discord API: buttons, the bench, DM invites, reminders, the close-out,
-loot and stats, plus start-time parsing across daylight saving. `SHOW=1`
-prints every reply.
+loot and stats, plus start-time parsing across daylight saving.
+`test/live_test.ts` runs go-live alerts against a fake Twitch: going live,
+a game change, a dropped stream coming back, the end card and `@everyone`.
+`SHOW=1` prints every reply.
 
 ## The old Val Town version
 

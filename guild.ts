@@ -43,6 +43,7 @@ export const FEATURES: Record<string, { label: string; groups: string[] }> = {
   askme: { label: "Ask me anything (/askme: an AI answer with a source)", groups: ["askme"] },
   quotes: { label: "Quotes (/quote)", groups: ["quotes"] },
   wow: { label: "World of Warcraft: Forever (/wow: launch countdown, raid signups, invites, attendance)", groups: ["wowforever", "wowraid"] },
+  live: { label: "Go-live alerts (/live: a post when a Twitch streamer goes live)", groups: ["livealerts"] },
 };
 
 /** Features a new server starts with off anyway (gambling is opt-in, as on Twitch). */
