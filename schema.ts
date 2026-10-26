@@ -15,6 +15,8 @@ import { ensureHoardTables } from "./game/hoard_db.ts";
 import { ensureBattleLogTables } from "./game/battle_log.ts";
 import { ensureSavingThrowTables } from "./game/savingthrows.ts";
 import { ensureChannelOptionTables } from "./game/channel_options.ts";
+import { ensureQuoteTables } from "./game/quotes.ts";
+import { ensureWowTables } from "./wow_db.ts";
 import { ensureMemberTables } from "./identity.ts";
 import { ensureGuildTables } from "./guild.ts";
 
@@ -27,7 +29,7 @@ export function ensureSchema(): Promise<void> {
       ensureSocialTables(), ensurePointsTables(), ensureSwearJarTables(), ensureAutohuntTables(),
       ensureHuntCooldownTables(), ensureWildShapeTables(), ensureRaidTables(), ensureBestiaryTables(),
       ensureHoardTables(), ensureBattleLogTables(), ensureSavingThrowTables(), ensureChannelOptionTables(),
-      ensureMemberTables(), ensureGuildTables(),
+      ensureMemberTables(), ensureGuildTables(), ensureQuoteTables(), ensureWowTables(),
     ]);
   })().catch((e) => {
     ready = null;

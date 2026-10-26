@@ -33,6 +33,9 @@ import { getChannelRoster, handleBestiaryCommand } from "./game/bestiary.ts";
 import { handleHuntCooldownCommand } from "./game/huntcooldown.ts";
 import { handleRaidCommand, maybeLaunchRaidSafe } from "./game/raid.ts";
 import { handleOracleCommand } from "./game/oracle.ts";
+import { handleFunCommand } from "./game/funstuff.ts";
+import { handleAskMeCommand } from "./game/askme.ts";
+import { handleQuoteCommand } from "./game/quotes.ts";
 import { handleBuiltinChatCommand } from "./game/chat_builtin.ts";
 import { featureForGroup } from "./guild.ts";
 
@@ -65,7 +68,7 @@ export async function runGameCommand(ctx: GameContext): Promise<void> {
   const commandWord = chatMessage.split(/\s+/)[0].toLowerCase();
   defer(recordActivity(chatter, broadcasterId, commandWord, chatMessage));
   if (!groupOn) {
-    const feature = group ? featureForGroup(group) : null;
+    const feature = group ? featureForGroup(group) ?? group : null;
     await sendChatMessage(
       `@${display} that's switched off in this server.${feature ? ` A moderator can turn it on with /guildscribe feature name:${feature} state:on.` : ""}`,
       broadcasterId,
@@ -98,6 +101,9 @@ export async function runGameCommand(ctx: GameContext): Promise<void> {
   if (await handleBestiaryCommand(chatMessage, chatter, display, broadcasterId, isModerator, PUBLIC_BASE_URL)) return;
   if (await handleHuntCooldownCommand(chatMessage, chatter, display, broadcasterId, isModerator)) return;
   if (await handleRaidCommand(chatMessage, chatter, display, broadcasterId, isModerator)) return;
+  if (await handleFunCommand(chatMessage, display, broadcasterId)) return;
   if (await handleOracleCommand(chatMessage, chatter, display, broadcasterId)) return;
+  if (await handleAskMeCommand(chatMessage, chatter, display, broadcasterId, isModerator)) return;
+  if (await handleQuoteCommand(chatMessage, display, broadcasterId, isModerator, PUBLIC_BASE_URL)) return;
   await handleBuiltinChatCommand({ chatMessage, chatter, display, broadcasterId, isModerator, baseUrl: PUBLIC_BASE_URL });
 }

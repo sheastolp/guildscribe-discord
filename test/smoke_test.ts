@@ -44,6 +44,7 @@ async function run(who: typeof ALICE, path: string, opts: Record<string, string 
     s: (n: string) => (opts[n] === undefined ? "" : String(opts[n])),
     u: (n: string) => (opts[n] ? `@${loginFor(String(opts[n]))}` : ""),
     b: (n: string) => opts[n] === true,
+    id: (n: string) => (opts[n] === undefined ? "" : String(opts[n])),
   };
   const text = found.leaf.twitch!(a);
   const login = loginFor(who.userId);
@@ -153,6 +154,19 @@ Deno.test("Dragon's Dice starts off, then bets gold on the chosen die", async ()
   await setFeature(GUILD, "gamble", false);
 });
 
+Deno.test("fun, quotes, the WoW countdown, and any chat command through /gs", async () => {
+  assertMatch(await run(ALICE, "fun coinflip", {}, false), /heads|tails/i);
+  assertEquals(await run(ALICE, "fun flip", { text: "hello" }, false), "ollǝɥ");
+  assertMatch(await run(ALICE, "quote add", { text: "\"I meant to do that\" — Bob" }), /#1/);
+  assertMatch(await run(BOB, "quote show", { which: "1" }, false), /I meant to do that/);
+  assertMatch(await run(BOB, "quote count", {}, false), /1 quote/);
+  assertMatch(await run(ALICE, "wow forever", {}, false), /World of Warcraft: Forever/);
+  // A chat command with no slash command of its own, with or without the "!".
+  assertMatch(await run(ALICE, "gs", { command: "!unflip" }, false), /┬─┬/);
+  assertMatch(await run(ALICE, "gs", { command: "wow:forever" }, false), /World of Warcraft: Forever/);
+  assertEquals(await toDiscordText(GUILD, "Try !wow:forever or !coinflip"), "Try /wow forever or /fun coinflip");
+});
+
 Deno.test("replies use slash commands, not Twitch chat commands", async () => {
   const text = await toDiscordText(GUILD, "Try !dndduel party hunt attack, !createchar or !gold give @u1 5sp — and !party hunt crew.");
   assertEquals(text, "Try /duel hunt attack, /createchar or /gold give @u1 5sp — and /duel hunt crew.");
@@ -234,6 +248,27 @@ Deno.test("a slash command is deferred, then answered through the interaction we
     assertEquals((edit.body.allowed_mentions ?? JSON.parse(String((edit.body as FormData).get("payload_json"))).allowed_mentions).parse, []);
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+Deno.test("start-up registers the slash commands only when they've changed", async () => {
+  const { registerIfChanged } = await import("../server.ts");
+  const puts: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    puts.push(`${init?.method} ${String(input)}`);
+    return Promise.resolve(new Response(JSON.stringify(JSON.parse(String(init?.body))), { status: 200 }));
+  }) as typeof fetch;
+  Deno.env.set("DISCORD_APPLICATION_ID", "999999999999999999");
+  Deno.env.set("DISCORD_BOT_TOKEN", "test-token");
+  try {
+    assert(await registerIfChanged());
+    assertEquals(puts, ["PUT https://discord.com/api/v10/applications/999999999999999999/commands"]);
+    assertEquals(await registerIfChanged(), false);
+    assertEquals(puts.length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+    Deno.env.delete("DISCORD_APPLICATION_ID");
   }
 });
 

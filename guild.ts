@@ -11,10 +11,18 @@
 // so every game feature starts on; moderators switch them with
 // /guildscribe feature. The merchant still starts away (it posts on its own),
 // and Dragon's Dice (STARTS_OFF) waits for a moderator to opt in.
+//
+// A feature added later (FEATURES grows, or a sync brings new game code)
+// is switched to its starting state in servers set up before it, the next
+// time they're seen (discord_guilds.features lists the ones already done).
+// Any other Twitch dashboard switch can be flipped by its own name too
+// (/guildscribe feature name:<group>), so a new Twitch command group that
+// starts off is never out of reach.
 
 import { sqlite } from "./game/sqlite.ts";
 import { isCommandGroupEnabled, setCommandGroupEnabled } from "./game/db.ts";
 import { isPointsEnabled, setPointsEnabled } from "./game/points_db.ts";
+import { COMMAND_GROUPS } from "./game/commandgroups.ts";
 
 /** Feature name (/guildscribe feature) → the Twitch dashboard switches it covers. */
 export const FEATURES: Record<string, { label: string; groups: string[] }> = {
@@ -31,6 +39,10 @@ export const FEATURES: Record<string, { label: string; groups: string[] }> = {
   rob: { label: "Robbing (/rob)", groups: ["rob"] },
   bribe: { label: "Bribing (/bribe)", groups: ["bribe"] },
   gamble: { label: "Dragon's Dice (/gamble)", groups: ["gamble"] },
+  fun: { label: "Fun stuff (/fun: coinflip, flip, jumble, dad jokes, animal facts and pictures)", groups: ["funstuff"] },
+  askme: { label: "Ask me anything (/askme: an AI answer with a source)", groups: ["askme"] },
+  quotes: { label: "Quotes (/quote)", groups: ["quotes"] },
+  wow: { label: "World of Warcraft: Forever (/wow: launch countdown, raid signups, invites, attendance)", groups: ["wowforever", "wowraid"] },
 };
 
 /** Features a new server starts with off anyway (gambling is opt-in, as on Twitch). */
@@ -46,7 +58,14 @@ export async function ensureGuildTables() {
       set_up_at INTEGER NOT NULL
     )`,
   );
+  // Added after the first servers were set up; NULL means "the original features".
+  try {
+    await sqlite.execute("ALTER TABLE discord_guilds ADD COLUMN features TEXT");
+  } catch { /* already there */ }
 }
+
+/** The features a server had before discord_guilds.features existed. */
+const ORIGINAL_FEATURES = ["characters", "dice", "lookups", "bg3", "div2", "combat", "hunts", "raid", "gold", "giveaways", "rob", "bribe", "gamble"];
 
 const ready = new Set<string>();
 const lastChannel = new Map<string, string>();
@@ -54,8 +73,9 @@ const lastChannel = new Map<string, string>();
 /** Makes sure a server can play, the first time it's seen; remembers the channel commands are used in. */
 export async function ensureGuild(guildId: string, channelId?: string, fetchName?: () => Promise<string | null>) {
   if (!ready.has(guildId)) {
-    const res = await sqlite.execute("SELECT guild_id FROM discord_guilds WHERE guild_id = ?", [guildId]);
+    const res = await sqlite.execute("SELECT features FROM discord_guilds WHERE guild_id = ?", [guildId]);
     if (!res.rows.length) await setUpGuild(guildId, fetchName);
+    else await addNewFeatures(guildId, (res.rows[0] as any).features);
     ready.add(guildId);
   }
   if (channelId && lastChannel.get(guildId) !== channelId) {
@@ -74,11 +94,32 @@ async function setUpGuild(guildId: string, fetchName?: () => Promise<string | nu
   );
   await sqlite.execute("UPDATE broadcasters SET connected = 1, is_live = 1 WHERE broadcaster_id = ?", [guildId]);
   for (const feature of Object.keys(FEATURES)) await setFeature(guildId, feature, !STARTS_OFF.has(feature));
-  await sqlite.execute("INSERT OR IGNORE INTO discord_guilds (guild_id, name, set_up_at) VALUES (?, ?, ?)", [guildId, name, now]);
+  await sqlite.execute("INSERT OR IGNORE INTO discord_guilds (guild_id, name, set_up_at, features) VALUES (?, ?, ?, ?)", [guildId, name, now, Object.keys(FEATURES).join(",")]);
+}
+
+/** Switches features this server hasn't had yet to their starting state, leaving the rest as its moderators set them. */
+async function addNewFeatures(guildId: string, recorded: unknown) {
+  const done = new Set(recorded ? String(recorded).split(",") : ORIGINAL_FEATURES);
+  const fresh = Object.keys(FEATURES).filter((f) => !done.has(f));
+  if (!fresh.length) return;
+  for (const feature of fresh) await setFeature(guildId, feature, !STARTS_OFF.has(feature));
+  await sqlite.execute("UPDATE discord_guilds SET features = ? WHERE guild_id = ?", [[...done, ...fresh].join(","), guildId]);
+}
+
+/** A name /guildscribe feature accepts: one of FEATURES, or any Twitch dashboard switch. */
+export function isSwitchName(name: string): boolean {
+  return Boolean(FEATURES[name] || COMMAND_GROUPS[name]);
+}
+
+/** Choices for /guildscribe feature's name, matching what's typed so far (features first). */
+export function switchChoices(typed: string): string[] {
+  const q = typed.toLowerCase().trim();
+  const names = [...Object.keys(FEATURES), ...Object.keys(COMMAND_GROUPS).filter((g) => !featureForGroup(g))];
+  return names.filter((n) => n.includes(q)).slice(0, 25);
 }
 
 export async function setFeature(guildId: string, feature: string, on: boolean) {
-  const def = FEATURES[feature];
+  const def = FEATURES[feature] ?? (COMMAND_GROUPS[feature] ? { groups: [feature] } : null);
   if (!def) throw new Error(`unknown feature ${feature}`);
   for (const group of def.groups) await setCommandGroupEnabled(guildId, group, on);
   if (feature === "gold") await setPointsEnabled(guildId, on);

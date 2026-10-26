@@ -7,12 +7,13 @@
 // fights and 5e.tools lookups can take longer than 3 seconds.
 //
 // Posts nobody asked for (merchant ads, autohunt reports, raid launches) and
-// DMs use the bot token.
+// DMs use the bot token, and so do edits to the bot's own posts later on
+// (a WoW raid signup post, wow.ts): an interaction's webhook only lasts 15 minutes.
 
 const API = "https://discord.com/api/v10";
 
 export const InteractionType = { PING: 1, APPLICATION_COMMAND: 2, MESSAGE_COMPONENT: 3, AUTOCOMPLETE: 4, MODAL_SUBMIT: 5 } as const;
-export const ResponseType = { PONG: 1, CHANNEL_MESSAGE: 4, DEFERRED_CHANNEL_MESSAGE: 5 } as const;
+export const ResponseType = { PONG: 1, CHANNEL_MESSAGE: 4, DEFERRED_CHANNEL_MESSAGE: 5, DEFERRED_UPDATE_MESSAGE: 6, UPDATE_MESSAGE: 7, AUTOCOMPLETE_RESULT: 8 } as const;
 export const EPHEMERAL = 1 << 6;
 
 export function env(name: string): string {
@@ -50,13 +51,24 @@ export interface OutMessage {
   files?: { name: string; content: string }[];
   /** User IDs this message may ping; nobody else is pinged. */
   ping?: string[];
+  /** Discord embed objects (wow.ts's raid cards). */
+  embeds?: unknown[];
+  /** Action rows of buttons; [] removes them. */
+  components?: unknown[];
+  /** Role IDs this message may ping (a raid post's "@Raiders"). */
+  pingRoles?: string[];
+  /** Only the member who used the command or button sees it (interaction replies and follow-ups). */
+  ephemeral?: boolean;
 }
 
 function messageBody(m: OutMessage): BodyInit {
   const payload: Record<string, unknown> = {
     content: m.content.slice(0, 2000),
-    allowed_mentions: { parse: [], users: m.ping ?? [] },
+    allowed_mentions: { parse: [], users: m.ping ?? [], ...(m.pingRoles?.length ? { roles: m.pingRoles } : {}) },
   };
+  if (m.ephemeral) payload.flags = EPHEMERAL;
+  if (m.embeds) payload.embeds = m.embeds;
+  if (m.components) payload.components = m.components;
   if (!m.files?.length) return JSON.stringify(payload);
   payload.attachments = m.files.map((f, i) => ({ id: i, filename: f.name }));
   const form = new FormData();
@@ -99,6 +111,28 @@ export async function followUp(appId: string, token: string, m: OutMessage) {
 /** Posts in a server channel as the bot. */
 export async function postToChannel(channelId: string, m: OutMessage): Promise<boolean> {
   return (await call("POST", `/channels/${channelId}/messages`, messageBody(m))) !== null;
+}
+
+/** Posts in a channel as the bot; the new message's id, or null. */
+export async function createMessage(channelId: string, m: OutMessage): Promise<string | null> {
+  const msg = await call("POST", `/channels/${channelId}/messages`, messageBody(m));
+  return msg?.id ? String(msg.id) : null;
+}
+
+/** Edits one of the bot's own messages. */
+export async function editMessage(channelId: string, messageId: string, m: OutMessage): Promise<boolean> {
+  return (await call("PATCH", `/channels/${channelId}/messages/${messageId}`, messageBody(m))) !== null;
+}
+
+/** The body of an interaction response that carries a message (reply or in-place update). */
+export function messageData(m: OutMessage, ephemeral = m.ephemeral ?? false) {
+  return {
+    content: m.content.slice(0, 2000),
+    allowed_mentions: { parse: [], users: m.ping ?? [], ...(m.pingRoles?.length ? { roles: m.pingRoles } : {}) },
+    ...(m.embeds ? { embeds: m.embeds } : {}),
+    ...(m.components ? { components: m.components } : {}),
+    ...(ephemeral ? { flags: EPHEMERAL } : {}),
+  };
 }
 
 const dmChannels = new Map<string, string>();

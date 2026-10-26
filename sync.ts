@@ -27,6 +27,7 @@ export const ENTRIES = [
   "bestiary.ts", "huntcooldown.ts", "raid.ts", "oracle.ts",
   "chat_builtin.ts", "gear.ts", "savingthrows.ts",
   "bestiary_page.ts", "gold_page.ts", "gear_page.ts",
+  "funstuff.ts", "askme.ts", "quotes.ts",
 ];
 
 /** Discord's own stand-ins for Twitch-only modules (see the header of each). */

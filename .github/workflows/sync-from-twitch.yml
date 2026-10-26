@@ -1,0 +1,66 @@
+# Keeps game/ in step with the GuildScribe Twitch bot (sync.ts), so the
+# Discord bot plays the same game without anyone running the sync by hand.
+#
+# Every 15 minutes (or on demand): copy the Twitch bot's game modules from
+# sheastolp/dnd-twitch-bot main. When anything changed, type-check and run
+# the tests; only if both pass is the sync committed to main, where the Yoga
+# laptop's updater picks it up within 3 minutes. A sync that breaks the
+# Discord side fails this workflow instead (GitHub emails you), and the bot
+# stays on its last good version.
+name: Sync game from the Twitch bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [twitch-bot-updated]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-twitch
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the Twitch bot
+        uses: actions/checkout@v4
+        with:
+          repository: sheastolp/dnd-twitch-bot
+          ref: main
+          path: .twitch-bot
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Copy the game modules
+        id: sync
+        run: |
+          TWITCH_REPO=.twitch-bot deno task sync
+          if [ -n "$(git status --porcelain -- game)" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Type-check
+        if: steps.sync.outputs.changed == 'true'
+        run: deno task check
+
+      - name: Test
+        if: steps.sync.outputs.changed == 'true'
+        run: deno task test
+
+      - name: Commit the sync
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          commit=$(git -C .twitch-bot rev-parse --short HEAD)
+          subject=$(git -C .twitch-bot log -1 --format=%s)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898729+github-actions[bot]@users.noreply.github.com"
+          git add game
+          git commit -m "Sync game from dnd-twitch-bot $commit" -m "Latest there: $subject"
+          git push

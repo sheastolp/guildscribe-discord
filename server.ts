@@ -6,7 +6,12 @@
 //   GET  /bestiary, /gold, /gear?channel=<server id>   the public pages the game links to
 //   GET  /health
 // and runs the game's scheduled jobs: autohunt settlement and raid musters
-// every minute, the wandering merchant every 5 minutes.
+// every minute, the wandering merchant every 5 minutes, and WoW raid
+// reminders and close-outs (wow.ts) every minute.
+//
+// At start-up it registers the slash commands with Discord when commands.ts
+// has changed since the last time (AUTO_REGISTER=0 turns that off), so a
+// deploy never leaves Discord showing yesterday's commands.
 //
 //   deno task start
 
@@ -24,6 +29,10 @@ import { renderGearPage } from "./game/gear_page.ts";
 import { warmFivetools } from "./game/fivetools.ts";
 import runAutohunt from "./game/autohunt_cron.ts";
 import runMerchant from "./game/merchant_cron.ts";
+import { runWowJobs } from "./wow.ts";
+import { registrationPayload } from "./commands.ts";
+import { putCommands } from "./discord.ts";
+import { sqlite } from "./game/sqlite.ts";
 
 const PORT = Number(Deno.env.get("PORT") || 8803);
 const HOST = Deno.env.get("HOST") || "127.0.0.1";
@@ -87,6 +96,26 @@ async function handlePage(path: string, url: URL): Promise<Response | null> {
   return await discordPage(guildId, renderGearPage(name, guildId, characters, PUBLIC_BASE_URL));
 }
 
+/** Registers the slash commands globally when they differ from the last registration. True when it registered. */
+export async function registerIfChanged(): Promise<boolean> {
+  const appId = Deno.env.get("DISCORD_APPLICATION_ID");
+  if (!appId || !Deno.env.get("DISCORD_BOT_TOKEN") || Deno.env.get("AUTO_REGISTER") === "0") return false;
+  const payload = JSON.stringify(registrationPayload());
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(appId + payload)));
+  const hash = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await sqlite.execute("CREATE TABLE IF NOT EXISTS discord_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  const res = await sqlite.execute("SELECT value FROM discord_meta WHERE key = 'commands_hash'");
+  if ((res.rows[0] as any)?.value === hash) return false;
+  const result = await putCommands(appId, JSON.parse(payload));
+  if (!result) {
+    console.error("Registering slash commands failed; trying again at the next start.");
+    return false;
+  }
+  await sqlite.execute("INSERT OR REPLACE INTO discord_meta (key, value) VALUES ('commands_hash', ?)", [hash]);
+  console.log(`Registered ${result.length} slash commands with Discord (they can take a few minutes to show everywhere).`);
+  return true;
+}
+
 export async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -109,6 +138,8 @@ if (import.meta.main) {
   await ensureSchema();
   every("autohunt_cron", cronMinutes("AUTOHUNT_CRON_MINUTES", 1), () => runAutohunt());
   every("merchant_cron", cronMinutes("MERCHANT_CRON_MINUTES", 5), () => runMerchant());
+  every("wow_cron", 1, () => runWowJobs());
+  registerIfChanged().catch((e) => console.error("command registration failed", e));
   // Download the 5e.tools archive in the background so the first lookup that needs it doesn't wait.
   warmFivetools();
   Deno.serve({ port: PORT, hostname: HOST }, (req) => {

@@ -9,7 +9,8 @@
 import { type Args, resolveInvocation } from "./commands.ts";
 import { InteractionType, ResponseType, EPHEMERAL, editOriginal, followUp, guildName, json, postToChannel, sendDm, splitMessage, verifyInteraction, type OutMessage } from "./discord.ts";
 import { displayName, loginFor, rememberMember, toDiscordText, toPlainText } from "./identity.ts";
-import { announceChannel, ensureGuild, featureStatus, FEATURES, setAnnounceChannel, setFeature } from "./guild.ts";
+import { announceChannel, ensureGuild, featureStatus, isSwitchName, setAnnounceChannel, setFeature, switchChoices } from "./guild.ts";
+import { handleWowButton, handleWowCommand, raidChoices } from "./wow.ts";
 import { runGameCommand } from "./router.ts";
 import { runInteraction, setSenders, type Reply } from "./game/scope.ts";
 import { PUBLIC_BASE_URL } from "./game/config.ts";
@@ -76,6 +77,8 @@ function helpText(): string {
     "**Arena & wilds** `/party` `/duel` `/turn` `/rob` `/bestiary` `/autohunt` `/huntcooldown` `/rally`",
     "**Hunt and Hoard** `/hoard` `/hunt` `/ledger` `/bounties` `/shop` `/buy` `/inv` `/sell` `/drop` `/purse`",
     "**Gold** `/gold` `/giveaway` `/bribe` `/gamble` · **Market** `/market` `/haggle` `/stall`",
+    "**Tavern talk** `/fun` `/askme` `/quote` · any chat command from the Twitch bot: `/gs`",
+    "**World of Warcraft: Forever** `/wow forever` · raids: `/wow raid create` `invite` `list` · `/wow character` `/wow stats` `/wow top`",
     "**Stewards** `/guildscribe status` · `/guildscribe feature` · `/guildscribe channel` · `/twitchinvite`",
   ];
   return lines.join("\n");
@@ -103,7 +106,7 @@ async function runLocal(kind: string, ctx: { guildId: string; moderator: boolean
   if (kind === "settings.feature") {
     const name = ctx.a.s("name");
     const on = ctx.a.s("state") === "on";
-    if (!FEATURES[name]) return { content: `Unknown feature ${name}.` };
+    if (!isSwitchName(name)) return { content: `Unknown feature ${name}. \`/guildscribe status\` lists them.` };
     await setFeature(ctx.guildId, name, on);
     return { content: `${on ? "🟢" : "⚫"} **${name}** is now ${on ? "on" : "off"} in this server.` };
   }
@@ -129,6 +132,10 @@ function argsFrom(options: any[]): Args {
       return id ? `@${loginFor(String(id))}` : "";
     },
     b: (name) => get(name) === true,
+    id: (name) => {
+      const v = get(name);
+      return v === undefined || v === null ? "" : String(v);
+    },
   };
 }
 
@@ -153,7 +160,9 @@ async function handleCommand(interaction: any) {
   }
 
   if (leaf.local) {
-    const m = await runLocal(leaf.local, { guildId, moderator, a });
+    const m = leaf.local.startsWith("wow.")
+      ? await handleWowCommand(leaf.local, { guildId, channelId: String(interaction.channel_id ?? ""), userId, display, moderator, a })
+      : await runLocal(leaf.local, { guildId, moderator, a });
     await editOriginal(appId, token, m);
     return;
   }
@@ -168,6 +177,22 @@ async function handleCommand(interaction: any) {
   for (const m of messages.slice(1)) await followUp(appId, token, m);
 }
 
+/** Suggestions while a member types: raid numbers (/wow raid …) and switch names (/guildscribe feature). */
+async function autocomplete(interaction: any): Promise<Array<{ name: string; value: string | number }>> {
+  if (!interaction.guild_id) return [];
+  const found = resolveInvocation(interaction.data);
+  const focused = found?.options.find((o: any) => o.focused);
+  if (!found || !focused) return [];
+  const typed = String(focused.value ?? "");
+  try {
+    if (found.command.name === "wow" && focused.name === "raid") return await raidChoices(String(interaction.guild_id), typed, found.leaf.name);
+    if (found.command.name === "guildscribe" && focused.name === "name") return switchChoices(typed).map((n) => ({ name: n, value: n }));
+  } catch (e) {
+    console.error("autocomplete failed", e);
+  }
+  return [];
+}
+
 export async function handleInteraction(req: Request): Promise<Response> {
   const body = await req.text();
   if (!(await verifyInteraction(body, req.headers.get("X-Signature-Ed25519"), req.headers.get("X-Signature-Timestamp")))) {
@@ -175,6 +200,11 @@ export async function handleInteraction(req: Request): Promise<Response> {
   }
   const interaction = JSON.parse(body);
   if (interaction.type === InteractionType.PING) return json({ type: ResponseType.PONG });
+  // Raid signup buttons work in the server and in invite DMs (wow.ts).
+  if (interaction.type === InteractionType.MESSAGE_COMPONENT && String(interaction.data?.custom_id ?? "").startsWith("wow:")) {
+    return await handleWowButton(interaction);
+  }
+  if (interaction.type === InteractionType.AUTOCOMPLETE) return json({ type: ResponseType.AUTOCOMPLETE_RESULT, data: { choices: await autocomplete(interaction) } });
   if (interaction.type !== InteractionType.APPLICATION_COMMAND) return json({ type: ResponseType.CHANNEL_MESSAGE, data: { content: "That button has expired.", flags: EPHEMERAL } });
   if (!interaction.guild_id) {
     return json({ type: ResponseType.CHANNEL_MESSAGE, data: { content: "GuildScribe plays in servers — use its commands in a server it's in.", flags: EPHEMERAL } });

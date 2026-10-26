@@ -7,19 +7,32 @@
 // option becomes "@login" (identity.ts), so handlers find their target the
 // same way they do on Twitch.
 //
-// `local` commands (help, settings, the Twitch invite) are answered by the
-// Discord layer itself (interactions.ts) instead.
+// `local` commands (help, settings, the Twitch invite, WoW raids) are
+// answered by the Discord layer itself (interactions.ts, wow.ts) instead.
 //
-// After changing this file, run `deno task register` so Discord sees it.
+// /gs takes any chat command as typed on Twitch ("/gs command:!pog"), so a
+// command the Twitch bot gains reaches Discord with the next sync, before it
+// gets a slash command of its own here.
+//
+// After changing this file, restart the bot: it registers the commands with
+// Discord itself when they've changed (server.ts). `deno task register`
+// still does it by hand.
 
-export type OptionType = "string" | "integer" | "boolean" | "user" | "channel";
+import { TIMEZONES } from "./wow_time.ts";
+
+export type OptionType = "string" | "integer" | "boolean" | "user" | "channel" | "role";
 
 export interface Option {
   name: string;
   description: string;
   type?: OptionType; // default "string"
   required?: boolean;
-  choices?: string[];
+  /** A value, or [label shown, value sent]. */
+  choices?: Array<string | [string, string]>;
+  /** Discord asks interactions.ts for suggestions as the member types (raid numbers, feature names). */
+  autocomplete?: boolean;
+  min?: number;
+  max?: number;
 }
 
 /** Reads the options of one invocation. */
@@ -29,6 +42,8 @@ export interface Args {
   /** A user option as "@login" ("" when left out). */
   u(name: string): string;
   b(name: string): boolean;
+  /** A user, role or channel option's Discord ID ("" when left out). */
+  id(name: string): string;
 }
 
 export interface Leaf {
@@ -49,6 +64,10 @@ export interface Command extends Leaf {
 const user = (description = "Who", required = false): Option => ({ name: "user", description, type: "user", required });
 const text = (name: string, description: string, required = false): Option => ({ name, description, required });
 const flag = (name: string, description: string): Option => ({ name, description, type: "boolean" });
+const raid = (): Option => ({ name: "raid", description: "Which raid (start typing its name or number)", type: "integer", required: true, autocomplete: true });
+const WOW_ZONES: Array<[string, string]> = TIMEZONES.map(([label, zone]) => [label, zone]);
+const WOW_SIZES: Array<[string, string]> = [["Party (5)", "5"], ["10", "10"], ["20", "20"], ["25", "25"], ["40", "40"]];
+const slot = (name: string, description: string): Option => ({ name, description, type: "integer", min: 0, max: 40 });
 
 /** One subcommand per word, each sending "!<base> <word>". */
 const words = (base: string, list: Array<[string, string]>): Leaf[] =>
@@ -80,7 +99,7 @@ export const COMMANDS: Command[] = [
         name: "feature",
         description: "Turn a feature on or off (moderators)",
         options: [
-          { name: "name", description: "Which feature", required: true, choices: ["characters", "dice", "lookups", "bg3", "div2", "combat", "hunts", "raid", "gold", "giveaways", "rob", "bribe", "gamble"] },
+          { name: "name", description: "Which feature (or any Twitch dashboard switch by name)", required: true, autocomplete: true },
           { name: "state", description: "On or off", required: true, choices: ["on", "off"] },
         ],
         local: "settings.feature",
@@ -94,6 +113,12 @@ export const COMMANDS: Command[] = [
     ],
   },
   { name: "twitchinvite", description: "Add GuildScribe to your Twitch channel", local: "twitchinvite" },
+  {
+    name: "gs",
+    description: "Any GuildScribe chat command, typed as on Twitch (e.g. !wow:forever)",
+    options: [text("command", "The chat command, e.g. !coinflip or !quote 12", true)],
+    twitch: (a) => a.s("command").replace(/^\/+/, "").replace(/^(?!!)/, "!"),
+  },
 
   // ── Adventurer's parchment ──
   { name: "createchar", description: "Roll an instant level 1 character", options: [user("Make one for someone else (moderators)")], twitch: (a) => `!createchar ${a.u("user")}` },
@@ -345,6 +370,132 @@ export const COMMANDS: Command[] = [
   },
   { name: "bribe", description: "Bribe someone. It never works.", options: [text("whom", "Whom to bribe (default: the town guard)")], twitch: (a) => `!bribe ${a.s("whom")}` },
 
+  // ── Fun, questions and quotes ──
+  {
+    name: "fun",
+    description: "Coin flips, table flips, dad jokes, animal facts and pictures",
+    subcommands: [
+      { name: "coinflip", description: "Heads or tails", twitch: () => "!coinflip" },
+      { name: "flip", description: "Flip a table, or some text upside down", options: [text("text", "Text to flip (default: the table)")], twitch: (a) => `!flip ${a.s("text")}` },
+      { name: "angryflip", description: "Flip it, angrily", options: [text("text", "Text to flip")], twitch: (a) => `!angryflip ${a.s("text")}` },
+      { name: "unflip", description: "Put the table back", twitch: () => "!unflip" },
+      { name: "jumble", description: "Scramble the letters of each word", options: [text("text", "What to jumble", true)], twitch: (a) => `!jumble ${a.s("text")}` },
+      { name: "dadjoke", description: "A dad joke", twitch: () => "!dadjoke" },
+      { name: "tempc", description: "°F to °C", options: [text("fahrenheit", "e.g. 72", true)], twitch: (a) => `!tempc ${a.s("fahrenheit")}` },
+      { name: "tempf", description: "°C to °F", options: [text("celsius", "e.g. 22", true)], twitch: (a) => `!tempf ${a.s("celsius")}` },
+      {
+        name: "fact",
+        description: "An animal fact",
+        options: [{ name: "animal", description: "Which animal (default: any)", choices: ["cat", "dog", "otter", "penguin", "sloth", "owl", "shark", "frog", "cow", "duck", "fox", "panda", "capybara", "axolotl", "bee", "dolphin", "wolf", "raccoon", "octopus"] }],
+        twitch: (a) => a.s("animal") ? `!${a.s("animal")}fact` : "!animalfact",
+      },
+      {
+        name: "pic",
+        description: "A random animal picture",
+        options: [{ name: "animal", description: "Which animal", required: true, choices: ["cat", "dog", "fox", "duck", "capybara"] }],
+        twitch: (a) => `!${a.s("animal")}pic`,
+      },
+    ],
+  },
+  { name: "askme", description: "Ask anything: a short answer from Wikipedia (and game wikis), with the source", options: [text("question", "e.g. how far away is the moon?", true)], twitch: (a) => `!askme ${a.s("question")}` },
+  {
+    name: "quote",
+    description: "The server's book of memorable lines",
+    hint: { bare: "random", arg: "show" },
+    subcommands: [
+      { name: "random", description: "A random quote", twitch: () => "!quote" },
+      { name: "show", description: "A quote by number, or a random one with these words", options: [text("which", "A number or some words", true)], twitch: (a) => `!quote ${a.s("which")}` },
+      { name: "count", description: "How many quotes there are", twitch: () => "!quotes" },
+      { name: "add", description: "Add a quote (moderators)", options: [text("text", "The quote, e.g. \"I meant to do that\" — Bob", true)], twitch: (a) => `!quote add ${a.s("text")}` },
+      {
+        name: "edit",
+        description: "Reword a quote (moderators)",
+        options: [{ name: "number", description: "Which quote", type: "integer", required: true }, text("text", "The new wording", true)],
+        twitch: (a) => `!quote edit ${a.s("number")} ${a.s("text")}`,
+      },
+      { name: "remove", description: "Delete a quote (moderators)", options: [{ name: "number", description: "Which quote", type: "integer", required: true }], twitch: (a) => `!quote remove ${a.s("number")}` },
+    ],
+  },
+
+  // ── World of Warcraft: Forever (wow.ts) ──
+  {
+    name: "wow",
+    description: "World of Warcraft: Forever: launch countdown, raid signups, invites and attendance",
+    subcommands: [
+      { name: "forever", description: "Countdown to the World of Warcraft: Forever launch", twitch: () => "!wow:forever" },
+      {
+        name: "character",
+        description: "Set your main, shown on raid rosters",
+        options: [text("name", "Character name", true), text("class", "e.g. Warrior, Priest, Shaman"), { name: "role", description: "What you usually play", choices: ["tank", "healer", "dps"] }],
+        local: "wow.character",
+      },
+      { name: "stats", description: "Raids attended, no-shows, roles and loot", options: [user("Whose (default: yours)")], local: "wow.stats" },
+      { name: "top", description: "Most raids attended in this server", local: "wow.top" },
+      {
+        name: "timezone",
+        description: "The server's default raid timezone and reminder time (moderators change them)",
+        options: [
+          { name: "zone", description: "Default timezone for raid times", choices: WOW_ZONES },
+          { name: "remind", description: "Minutes before a raid to remind signups (0 = off)", type: "integer", min: 0, max: 1440 },
+        ],
+        local: "wow.timezone",
+      },
+    ],
+    groups: [
+      {
+        name: "raid",
+        description: "Raid and party nights",
+        subcommands: [
+          {
+            name: "create",
+            description: "Post a raid or party with signup buttons",
+            options: [
+              text("title", "e.g. Molten Core, Onyxia, Deadmines run", true),
+              text("when", "e.g. fri 8pm, tomorrow 19:30, 11/8 8:30pm, in 2h", true),
+              { name: "size", description: "How many (default 10)", choices: WOW_SIZES },
+              { name: "timezone", description: "Timezone for when (default: the server's, see /wow timezone)", choices: WOW_ZONES },
+              slot("tanks", "Tank slots (default by size)"),
+              slot("healers", "Healer slots (default by size)"),
+              slot("dps", "DPS slots (default by size)"),
+              text("notes", "Anything else: requirements, meeting spot, consumables"),
+              { name: "ping", description: "A role to ping on the post, e.g. @Raiders", type: "role" },
+              { name: "channel", description: "Where to post it (default: here)", type: "channel" },
+            ],
+            local: "wow.raid.create",
+          },
+          { name: "list", description: "Upcoming raids and the last few", local: "wow.raid.list" },
+          { name: "view", description: "A raid's card", options: [raid()], local: "wow.raid.view" },
+          {
+            name: "invite",
+            description: "Invite members: a DM with signup buttons, and a ping here",
+            options: [raid(), user("Who to invite"), text("members", "Or several at once: paste @mentions")],
+            local: "wow.raid.invite",
+          },
+          {
+            name: "edit",
+            description: "Change a raid's time, name, notes or slots (leader)",
+            options: [
+              raid(), text("when", "New start time"), { name: "timezone", description: "Timezone for when", choices: WOW_ZONES }, text("title", "New name"),
+              text("notes", "New notes (- clears them)"), { name: "size", description: "New size", choices: WOW_SIZES },
+              slot("tanks", "Tank slots"), slot("healers", "Healer slots"), slot("dps", "DPS slots"),
+            ],
+            local: "wow.raid.edit",
+          },
+          { name: "remove", description: "Take someone off the signups (leader)", options: [raid(), user("Who", true)], local: "wow.raid.remove" },
+          { name: "cancel", description: "Call a raid off; signups get a DM (leader)", options: [raid(), text("reason", "Why (goes in the DM)")], local: "wow.raid.cancel" },
+          { name: "complete", description: "Close a raid out now: everyone in counts as there (leader)", options: [raid()], local: "wow.raid.complete" },
+          {
+            name: "attendance",
+            description: "Fix who showed up, after a raid (leader)",
+            options: [raid(), user("Who", true), { name: "status", description: "What happened", required: true, choices: [["Showed up", "present"], ["No-show", "noshow"], ["Take off the list", "remove"]] }],
+            local: "wow.raid.attendance",
+          },
+          { name: "loot", description: "Record a drop handed out (leader)", options: [raid(), user("Who got it", true), text("item", "e.g. Thunderfury", true)], local: "wow.raid.loot" },
+        ],
+      },
+    ],
+  },
+
   // ── Market ──
   {
     name: "market",
@@ -357,15 +508,19 @@ export const COMMANDS: Command[] = [
 
 // ── Building the Discord registration payload ──
 
-const OPTION_TYPES: Record<OptionType, number> = { string: 3, integer: 4, boolean: 5, user: 6, channel: 7 };
+const OPTION_TYPES: Record<OptionType, number> = { string: 3, integer: 4, boolean: 5, user: 6, channel: 7, role: 8 };
 
 function optionPayload(o: Option) {
+  const value = (v: string) => o.type === "integer" ? Number(v) : v;
   return {
     type: OPTION_TYPES[o.type ?? "string"],
     name: o.name,
     description: o.description.slice(0, 100),
     required: o.required ?? false,
-    ...(o.choices ? { choices: o.choices.map((c) => ({ name: c, value: c })) } : {}),
+    ...(o.choices ? { choices: o.choices.map((c) => Array.isArray(c) ? { name: c[0], value: value(c[1]) } : { name: c, value: value(c) }) } : {}),
+    ...(o.autocomplete ? { autocomplete: true } : {}),
+    ...(o.min !== undefined ? { min_value: o.min } : {}),
+    ...(o.max !== undefined ? { max_value: o.max } : {}),
     ...(o.type === "channel" ? { channel_types: [0, 5] } : {}),
   };
 }
@@ -448,6 +603,23 @@ const RENAMES: Array<[string, string]> = [
   ["!div2mission", "/div2 mission"],
   ["!div2lookup", "/div2 lookup"],
   ["!div2", "/div2 list"],
+  ["!wow:forever", "/wow forever"],
+  ["!wowforever", "/wow forever"],
+  ["!quote add", "/quote add"],
+  ["!quote edit", "/quote edit"],
+  ["!quote remove", "/quote remove"],
+  ["!addquote", "/quote add"],
+  ["!delquote", "/quote remove"],
+  ["!quotes", "/quote count"],
+  ["!coinflip", "/fun coinflip"],
+  ["!angryflip", "/fun angryflip"],
+  ["!unflip", "/fun unflip"],
+  ["!flip", "/fun flip"],
+  ["!jumble", "/fun jumble"],
+  ["!dadjoke", "/fun dadjoke"],
+  ["!tempc", "/fun tempc"],
+  ["!tempf", "/fun tempf"],
+  ["!animalfact", "/fun fact"],
 ];
 
 function hintRegex(twitch: string): RegExp {

@@ -2,6 +2,7 @@
   "twitchCommit": "26ca9a1",
   "files": [
     "abilities_cmd.ts",
+    "askme.ts",
     "autohunt.ts",
     "autohunt_cron.ts",
     "autohunt_db.ts",
@@ -39,6 +40,7 @@
     "fivetools.ts",
     "flavor.ts",
     "flavor_events.ts",
+    "funstuff.ts",
     "gamble.ts",
     "gear.ts",
     "gear_page.ts",
@@ -60,6 +62,7 @@
     "peddler_guard.ts",
     "points.ts",
     "points_db.ts",
+    "quotes.ts",
     "raid.ts",
     "rob.ts",
     "savingthrows.ts",

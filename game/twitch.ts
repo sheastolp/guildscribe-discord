@@ -35,6 +35,11 @@ export async function fetchIsChannelLiveNow(_broadcasterId: string): Promise<boo
   return true;
 }
 
+/** A server has no Twitch category or stream title (askme.ts, quotes.ts read them for context). */
+export async function getChannelInfo(_broadcasterId: string): Promise<{ gameName: string; title: string } | null> {
+  return null;
+}
+
 /** Twitch shoutouts (!so) have no Discord counterpart. */
 export async function getShoutoutProfile(_login: string): Promise<{
   displayName: string;
