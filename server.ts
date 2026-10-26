@@ -7,8 +7,13 @@
 //   GET  /health
 // and runs the game's scheduled jobs: autohunt settlement and raid musters
 // every minute, the wandering merchant every 5 minutes, and WoW raid
-// reminders and close-outs (wow.ts) and Twitch go-live checks (live.ts)
-// every minute.
+// reminders and close-outs (wow.ts), Twitch go-live checks (live.ts) and
+// raffle draws (raffles.ts) every minute, birthdays (birthdays.ts) and feed
+// alerts (notify.ts) every 5.
+//
+// It also connects to Discord's Gateway (gateway.ts), which brings messages,
+// joins, leaves and invites: levels, invite tracking, welcome messages, the
+// honeypot, security and the server log run on those.
 //
 // At start-up it registers the slash commands with Discord when commands.ts
 // has changed since the last time (AUTO_REGISTER=0 turns that off), so a
@@ -32,6 +37,10 @@ import runAutohunt from "./game/autohunt_cron.ts";
 import runMerchant from "./game/merchant_cron.ts";
 import { runWowJobs } from "./wow.ts";
 import { runLiveJobs } from "./live.ts";
+import { runBirthdayJobs } from "./birthdays.ts";
+import { runRaffleJobs } from "./raffles.ts";
+import { runNotifyJobs } from "./notify.ts";
+import { startGateway } from "./gateway.ts";
 import { registrationPayload } from "./commands.ts";
 import { putCommands } from "./discord.ts";
 import { sqlite } from "./game/sqlite.ts";
@@ -142,6 +151,11 @@ if (import.meta.main) {
   every("merchant_cron", cronMinutes("MERCHANT_CRON_MINUTES", 5), () => runMerchant());
   every("wow_cron", 1, () => runWowJobs());
   every("live_cron", 1, () => runLiveJobs());
+  every("raffle_cron", 1, () => runRaffleJobs());
+  every("birthday_cron", 5, () => runBirthdayJobs());
+  every("notify_cron", cronMinutes("NOTIFY_CRON_MINUTES", 5), () => runNotifyJobs());
+  // Messages, joins and invites for levels, invite tracking, welcome, the honeypot and security.
+  startGateway();
   registerIfChanged().catch((e) => console.error("command registration failed", e));
   // Download the 5e.tools archive in the background so the first lookup that needs it doesn't wait.
   warmFivetools();

@@ -6,28 +6,52 @@
 // becomes the reply: one message when it fits in 2,000 characters, a few
 // follow-ups when it doesn't, and a fight's uncut battle log as a file.
 
-import { type Args, resolveInvocation } from "./commands.ts";
+import { type Args, type LocalCtx, resolveInvocation } from "./commands.ts";
 import { InteractionType, ResponseType, EPHEMERAL, editOriginal, followUp, guildName, json, postToChannel, sendDm, splitMessage, verifyInteraction, type OutMessage } from "./discord.ts";
 import { displayName, loginFor, rememberMember, toDiscordText, toPlainText } from "./identity.ts";
 import { announceChannel, ensureGuild, featureStatus, isSwitchName, setAnnounceChannel, setFeature, switchChoices } from "./guild.ts";
 import { handleWowButton, handleWowCommand, raidChoices } from "./wow.ts";
 import { handleLiveCommand, liveChoices } from "./live.ts";
+import { handleLevelsCommand } from "./levels.ts";
+import { handleBirthdayCommand } from "./birthdays.ts";
+import { handleRaffleButton, handleRaffleCommand, raffleChoices } from "./raffles.ts";
+import { handleInvitesCommand } from "./invites.ts";
+import { handleNotifyCommand, notifyChoices } from "./notify.ts";
+import { handleWelcomeCommand } from "./welcome.ts";
+import { handleRolesButton, handleRolesCommand } from "./selfroles.ts";
+import { handleModCommand } from "./moderation.ts";
+import { handleHoneypotCommand } from "./honeypot.ts";
+import { handleSecurityCommand } from "./security.ts";
 import { runGameCommand } from "./router.ts";
 import { runInteraction, setSenders, type Reply } from "./game/scope.ts";
 import { PUBLIC_BASE_URL } from "./game/config.ts";
+import { MODERATOR_PERMS } from "./guildcache.ts";
 
-// Discord permission bits on interaction.member.permissions.
-const ADMINISTRATOR = 1n << 3n;
-const MANAGE_GUILD = 1n << 5n;
-const MANAGE_MESSAGES = 1n << 13n;
-
-function isModerator(permissions: string | undefined): boolean {
+function permissionBits(permissions: string | undefined): bigint {
   try {
-    return permissions ? (BigInt(permissions) & (ADMINISTRATOR | MANAGE_GUILD | MANAGE_MESSAGES)) !== 0n : false;
+    return permissions ? BigInt(permissions) : 0n;
   } catch {
-    return false;
+    return 0n;
   }
 }
+
+const isModerator = (permissions: bigint) => (permissions & MODERATOR_PERMS) !== 0n;
+
+/** Local commands by the first word of their `local` kind: the module that answers them. */
+const LOCAL_HANDLERS: Record<string, (kind: string, ctx: LocalCtx) => Promise<OutMessage>> = {
+  wow: handleWowCommand,
+  live: handleLiveCommand,
+  levels: handleLevelsCommand,
+  birthday: handleBirthdayCommand,
+  raffle: handleRaffleCommand,
+  invites: handleInvitesCommand,
+  notify: handleNotifyCommand,
+  welcome: handleWelcomeCommand,
+  roles: handleRolesCommand,
+  mod: handleModCommand,
+  honeypot: handleHoneypotCommand,
+  security: handleSecurityCommand,
+};
 
 const MAX_MESSAGES = 4;
 const TWITCH_INVITE_URL = Deno.env.get("TWITCH_BOT_INVITE_URL") ?? "https://guildscribe.tavernworks.dev/connect";
@@ -80,7 +104,9 @@ function helpText(): string {
     "**Gold** `/gold` `/giveaway` `/bribe` `/gamble` · **Market** `/market` `/haggle` `/stall`",
     "**Tavern talk** `/fun` `/askme` `/quote` · any chat command from the Twitch bot: `/gs`",
     "**World of Warcraft: Forever** `/wow forever` · raids: `/wow raid create` `invite` `list` · `/wow character` `/wow stats` `/wow top`",
-    "**Go-live alerts** `/live list` · moderators: `/live add` `remove` `test`",
+    "**Go-live alerts** `/live list` · moderators: `/live add` `remove` `test` · **Feed alerts** (YouTube, Reddit, Bluesky, RSS) `/notify`",
+    "**Community** `/rank` `/levels` `/birthday` `/raffle` `/invites` · moderators: `/welcome` `/roles`",
+    "**Safety** (moderators) `/mod` `/honeypot` `/security`",
     "**Stewards** `/guildscribe status` · `/guildscribe feature` · `/guildscribe channel` · `/twitchinvite`",
   ];
   return lines.join("\n");
@@ -149,7 +175,8 @@ async function handleCommand(interaction: any) {
   const userId = String(user.id);
   const display = displayName(interaction.member, user);
   const login = loginFor(userId);
-  const moderator = isModerator(interaction.member?.permissions);
+  const permissions = permissionBits(interaction.member?.permissions);
+  const moderator = isModerator(permissions);
   const found = resolveInvocation(interaction.data);
   if (!found) return void await editOriginal(appId, token, { content: "This command has changed — Discord may still be updating its list. Try again in a minute." });
   const { leaf, options } = found;
@@ -163,10 +190,10 @@ async function handleCommand(interaction: any) {
 
   if (leaf.local) {
     const channelId = String(interaction.channel_id ?? "");
-    const m = leaf.local.startsWith("wow.")
-      ? await handleWowCommand(leaf.local, { guildId, channelId, userId, display, moderator, a })
-      : leaf.local.startsWith("live.")
-      ? await handleLiveCommand(leaf.local, { guildId, channelId, userId, moderator, a })
+    const roles: string[] = (interaction.member?.roles ?? []).map(String);
+    const handle = LOCAL_HANDLERS[leaf.local.split(".")[0]];
+    const m = handle
+      ? await handle(leaf.local, { guildId, channelId, userId, display, moderator, permissions, roles, a })
       : await runLocal(leaf.local, { guildId, moderator, a });
     await editOriginal(appId, token, m);
     return;
@@ -182,7 +209,8 @@ async function handleCommand(interaction: any) {
   for (const m of messages.slice(1)) await followUp(appId, token, m);
 }
 
-/** Suggestions while a member types: raid numbers (/wow raid …), watched streamers (/live) and switch names (/guildscribe feature). */
+/** Suggestions while a member types: raid numbers (/wow raid …), watched streamers (/live), raffles,
+ * followed feeds (/notify) and switch names (/guildscribe feature). */
 async function autocomplete(interaction: any): Promise<Array<{ name: string; value: string | number }>> {
   if (!interaction.guild_id) return [];
   const found = resolveInvocation(interaction.data);
@@ -192,6 +220,8 @@ async function autocomplete(interaction: any): Promise<Array<{ name: string; val
   try {
     if (found.command.name === "wow" && focused.name === "raid") return await raidChoices(String(interaction.guild_id), typed, found.leaf.name);
     if (found.command.name === "live" && focused.name === "streamer") return await liveChoices(String(interaction.guild_id), typed);
+    if (found.command.name === "raffle" && focused.name === "raffle") return await raffleChoices(String(interaction.guild_id), typed, found.leaf.name);
+    if (found.command.name === "notify" && focused.name === "feed") return await notifyChoices(String(interaction.guild_id), typed);
     if (found.command.name === "guildscribe" && focused.name === "name") return switchChoices(typed).map((n) => ({ name: n, value: n }));
   } catch (e) {
     console.error("autocomplete failed", e);
@@ -207,8 +237,12 @@ export async function handleInteraction(req: Request): Promise<Response> {
   const interaction = JSON.parse(body);
   if (interaction.type === InteractionType.PING) return json({ type: ResponseType.PONG });
   // Raid signup buttons work in the server and in invite DMs (wow.ts).
-  if (interaction.type === InteractionType.MESSAGE_COMPONENT && String(interaction.data?.custom_id ?? "").startsWith("wow:")) {
-    return await handleWowButton(interaction);
+  if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
+    const id = String(interaction.data?.custom_id ?? "");
+    if (id.startsWith("wow:")) return await handleWowButton(interaction);
+    // Raffle entries and role panels are server posts.
+    if (interaction.guild_id && id.startsWith("raffle:")) return await handleRaffleButton(interaction);
+    if (interaction.guild_id && id.startsWith("roles:")) return await handleRolesButton(interaction);
   }
   if (interaction.type === InteractionType.AUTOCOMPLETE) return json({ type: ResponseType.AUTOCOMPLETE_RESULT, data: { choices: await autocomplete(interaction) } });
   if (interaction.type !== InteractionType.APPLICATION_COMMAND) return json({ type: ResponseType.CHANNEL_MESSAGE, data: { content: "That button has expired.", flags: EPHEMERAL } });

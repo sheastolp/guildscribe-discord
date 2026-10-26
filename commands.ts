@@ -8,8 +8,10 @@
 // same way they do on Twitch.
 //
 // `local` commands (help, settings, the Twitch invite, WoW raids, go-live
-// alerts) are answered by the Discord layer itself (interactions.ts, wow.ts,
-// live.ts) instead.
+// alerts, and the community features: levels, birthdays, raffles, invites,
+// feed alerts, welcome messages, role panels, moderation, the honeypot and
+// security) are answered by the Discord layer itself (interactions.ts and
+// the module each kind's prefix names) instead.
 //
 // /gs takes any chat command as typed on Twitch ("/gs command:!pog"), so a
 // command the Twitch bot gains reaches Discord with the next sync, before it
@@ -47,6 +49,20 @@ export interface Args {
   id(name: string): string;
 }
 
+/** What a `local` command's handler gets (interactions.ts). */
+export interface LocalCtx {
+  guildId: string;
+  channelId: string;
+  userId: string;
+  display: string;
+  moderator: boolean;
+  /** The member's permissions in this channel (Discord's own calculation). */
+  permissions: bigint;
+  /** The member's role IDs. */
+  roles: string[];
+  a: Args;
+}
+
 export interface Leaf {
   name: string;
   description: string;
@@ -67,6 +83,8 @@ const text = (name: string, description: string, required = false): Option => ({
 const flag = (name: string, description: string): Option => ({ name, description, type: "boolean" });
 const raid = (): Option => ({ name: "raid", description: "Which raid (start typing its name or number)", type: "integer", required: true, autocomplete: true });
 const streamer = (): Option => ({ name: "streamer", description: "Which streamer (start typing)", required: true, autocomplete: true });
+const raffle = (): Option => ({ name: "raffle", description: "Which raffle (start typing its prize or number)", type: "integer", required: true, autocomplete: true });
+const feed = (): Option => ({ name: "feed", description: "Which feed (start typing)", type: "integer", required: true, autocomplete: true });
 const WOW_ZONES: Array<[string, string]> = TIMEZONES.map(([label, zone]) => [label, zone]);
 const WOW_SIZES: Array<[string, string]> = [["Party (5)", "5"], ["10", "10"], ["20", "20"], ["25", "25"], ["40", "40"]];
 const slot = (name: string, description: string): Option => ({ name, description, type: "integer", min: 0, max: 40 });
@@ -517,6 +535,273 @@ export const COMMANDS: Command[] = [
       { name: "remove", description: "Stop watching a streamer (moderators)", options: [streamer()], local: "live.remove" },
       { name: "list", description: "Who this server watches, and who's live now", local: "live.list" },
       { name: "test", description: "Post a streamer's alert now, to see how it looks (moderators)", options: [streamer()], local: "live.test" },
+    ],
+  },
+
+  // ── Levels (levels.ts) ──
+  { name: "rank", description: "Your level and XP from chatting (or someone else's)", options: [user("Whose (default: yours)")], local: "levels.rank" },
+  {
+    name: "levels",
+    description: "XP and levels for chatting, with role rewards",
+    subcommands: [
+      { name: "top", description: "The server's leaderboard", options: [{ name: "page", description: "Which page", type: "integer", min: 1 }], local: "levels.top" },
+      {
+        name: "settings",
+        description: "Level-up messages, XP per message and cooldown (moderators)",
+        options: [
+          { name: "announce", description: "Where level-ups are announced", choices: [["Where they chatted", "here"], ["By DM", "dm"], ["In one channel", "channel"], ["Nowhere", "off"]] },
+          { name: "channel", description: "The channel, for announce: In one channel", type: "channel" },
+          text("message", "Level-up text: {user} {level} (- for the default)"),
+          { name: "xp_min", description: "Least XP per message (default 15)", type: "integer", min: 0, max: 1000 },
+          { name: "xp_max", description: "Most XP per message (default 25)", type: "integer", min: 0, max: 1000 },
+          { name: "cooldown", description: "Seconds between messages that earn XP (default 60)", type: "integer", min: 0, max: 3600 },
+          { name: "stack", description: "Keep every reward role (true) or only the highest (false)", type: "boolean" },
+        ],
+        local: "levels.settings",
+      },
+      {
+        name: "noxp",
+        description: "Stop (or restart) a channel or role earning XP (moderators)",
+        options: [{ name: "channel", description: "A channel", type: "channel" }, { name: "role", description: "A role", type: "role" }],
+        local: "levels.noxp",
+      },
+      { name: "set", description: "Set someone's level (moderators)", options: [user("Who", true), { name: "level", description: "Level", type: "integer", required: true, min: 0, max: 500 }], local: "levels.set" },
+      { name: "give", description: "Give (or take, with a minus) XP (moderators)", options: [user("Who", true), { name: "xp", description: "XP, e.g. 500 or -200", type: "integer", required: true }], local: "levels.give" },
+      { name: "reset", description: "Take someone back to level 0 (moderators)", options: [user("Who", true)], local: "levels.reset" },
+    ],
+    groups: [{
+      name: "reward",
+      description: "Roles members get for reaching a level",
+      subcommands: [
+        { name: "add", description: "Give a role at a level (moderators)", options: [{ name: "level", description: "Level", type: "integer", required: true, min: 1, max: 500 }, { name: "role", description: "The role", type: "role", required: true }], local: "levels.reward.add" },
+        { name: "remove", description: "Stop giving a role at a level (moderators)", options: [{ name: "level", description: "Level", type: "integer", required: true, min: 1, max: 500 }], local: "levels.reward.remove" },
+        { name: "list", description: "Every level reward", local: "levels.reward.list" },
+      ],
+    }],
+  },
+
+  // ── Birthdays (birthdays.ts) ──
+  {
+    name: "birthday",
+    description: "Birthday wishes and a birthday role on the day",
+    subcommands: [
+      {
+        name: "set",
+        description: "Save your birthday",
+        options: [
+          { name: "month", description: "Month", type: "integer", required: true, choices: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((m, i) => [m, String(i + 1)] as [string, string]) },
+          { name: "day", description: "Day of the month", type: "integer", required: true, min: 1, max: 31 },
+          { name: "year", description: "Year you were born (optional: shows your age in the wish)", type: "integer", min: 1900, max: 2100 },
+          user("Someone else's (moderators)"),
+        ],
+        local: "birthday.set",
+      },
+      { name: "remove", description: "Forget your birthday", options: [user("Someone else's (moderators)")], local: "birthday.remove" },
+      { name: "show", description: "Someone's birthday", options: [user("Whose (default: yours)")], local: "birthday.show" },
+      { name: "upcoming", description: "The next birthdays in this server", local: "birthday.upcoming" },
+      {
+        name: "setup",
+        description: "Where wishes go, the birthday role, message and time (moderators)",
+        options: [
+          { name: "channel", description: "Where birthday wishes are posted", type: "channel" },
+          { name: "role", description: "A role members have on their birthday", type: "role" },
+          text("message", "The wish: {user} {age} (- for the default)"),
+          { name: "hour", description: "Hour of the day to post (0-23, default 9)", type: "integer", min: 0, max: 23 },
+          { name: "timezone", description: "Whose day it is (default: the server's /wow timezone)", choices: WOW_ZONES },
+          flag("off", "Stop posting and giving the role"),
+        ],
+        local: "birthday.setup",
+      },
+    ],
+  },
+
+  // ── Raffles (raffles.ts) ──
+  {
+    name: "raffle",
+    description: "Button giveaways for real prizes (Nitro, keys, anything)",
+    subcommands: [
+      {
+        name: "start",
+        description: "Start a raffle (moderators)",
+        options: [
+          text("prize", "What they win", true),
+          text("duration", "How long: 30m, 2h, 1d12h, 1w", true),
+          { name: "winners", description: "How many winners (default 1)", type: "integer", min: 1, max: 20 },
+          text("description", "More about it"),
+          { name: "role", description: "Only members with this role can enter", type: "role" },
+          { name: "channel", description: "Where to post it (default: here)", type: "channel" },
+        ],
+        local: "raffle.start",
+      },
+      { name: "end", description: "Draw a raffle now (moderators)", options: [raffle()], local: "raffle.end" },
+      { name: "reroll", description: "Draw again from those who haven't won (moderators)", options: [raffle(), { name: "winners", description: "How many (default 1)", type: "integer", min: 1, max: 20 }], local: "raffle.reroll" },
+      { name: "cancel", description: "Call a raffle off (moderators)", options: [raffle()], local: "raffle.cancel" },
+      { name: "list", description: "Raffles running now", local: "raffle.list" },
+    ],
+  },
+
+  // ── Invite tracking (invites.ts) ──
+  {
+    name: "invites",
+    description: "Who invited whom, and how many each member has brought in",
+    subcommands: [
+      { name: "show", description: "How many people someone has invited", options: [user("Whose (default: yours)")], local: "invites.show" },
+      { name: "top", description: "Top inviters", local: "invites.top" },
+      { name: "who", description: "Who invited someone", options: [user("Who", true)], local: "invites.who" },
+      { name: "bonus", description: "Add (or take away) invites (moderators)", options: [user("Who", true), { name: "amount", description: "e.g. 5 or -2", type: "integer", required: true }], local: "invites.bonus" },
+      {
+        name: "log",
+        description: "Announce joins and who invited them (moderators)",
+        options: [{ name: "channel", description: "Where (default: here)", type: "channel" }, text("message", "{user} {inviter} {invites} {code} (- for the default)"), flag("off", "Stop announcing")],
+        local: "invites.log",
+      },
+    ],
+  },
+
+  // ── Feed alerts (notify.ts) ──
+  {
+    name: "notify",
+    description: "Post when a YouTube channel, subreddit, Bluesky account or RSS feed has something new",
+    subcommands: [
+      {
+        name: "add",
+        description: "Follow something (moderators)",
+        options: [
+          { name: "source", description: "What kind", required: true, choices: [["YouTube channel", "youtube"], ["Subreddit", "reddit"], ["Bluesky account", "bluesky"], ["RSS or Atom feed", "rss"]] },
+          text("from", "A channel link or @handle, r/name, name.bsky.social, or a feed URL", true),
+          { name: "channel", description: "Where posts go (default: here)", type: "channel" },
+          { name: "ping", description: "A role to ping (pick @everyone for everyone)", type: "role" },
+          text("message", "{title} {url} {author} {source} (- for the default)"),
+        ],
+        local: "notify.add",
+      },
+      { name: "remove", description: "Stop following (moderators)", options: [feed()], local: "notify.remove" },
+      { name: "list", description: "What this server follows", local: "notify.list" },
+      { name: "test", description: "Post the latest item now (moderators)", options: [feed()], local: "notify.test" },
+    ],
+  },
+
+  // ── Welcome messages and autoroles (welcome.ts) ──
+  {
+    name: "welcome",
+    description: "Welcome and goodbye messages, a welcome DM and roles for new members (moderators)",
+    subcommands: [
+      { name: "message", description: "Greet new members in a channel", options: [{ name: "channel", description: "Where (default: here)", type: "channel" }, text("message", "{user} {username} {server} {count} {inviter} (- for the default)"), flag("off", "Stop greeting")], local: "welcome.message" },
+      { name: "leave", description: "Say goodbye when someone leaves", options: [{ name: "channel", description: "Where (default: here)", type: "channel" }, text("message", "{username} {server} {count} (- for the default)"), flag("off", "Stop saying goodbye")], local: "welcome.leave" },
+      { name: "dm", description: "DM each new member", options: [text("message", "{username} {server} {inviter} (- for none)"), flag("off", "No DM")], local: "welcome.dm" },
+      { name: "autorole", description: "A role every new member gets (pick it again to stop)", options: [{ name: "role", description: "The role", type: "role", required: true }], local: "welcome.autorole" },
+      { name: "test", description: "Show the messages as if you'd just joined", local: "welcome.test" },
+      { name: "status", description: "What's set", local: "welcome.status" },
+    ],
+  },
+
+  // ── Self-assign roles (selfroles.ts) ──
+  {
+    name: "roles",
+    description: "Posts with buttons members press to take roles (moderators)",
+    subcommands: [
+      {
+        name: "panel",
+        description: "Post a role panel",
+        options: [
+          ...Array.from({ length: 10 }, (_, i): Option => ({ name: `role${i + 1}`, description: `Role ${i + 1}`, type: "role", required: i === 0 })),
+          text("title", "Title (default: Pick your roles)"),
+          text("description", "Text on the panel (\\n for a new line)"),
+          { name: "mode", description: "Any number of roles, or one at a time", choices: [["Any (toggle)", "toggle"], ["One at a time", "single"]] },
+          { name: "channel", description: "Where to post it (default: here)", type: "channel" },
+        ],
+        local: "roles.panel",
+      },
+      { name: "list", description: "This server's role panels", local: "roles.list" },
+      { name: "delete", description: "Remove a panel and its post", options: [{ name: "panel", description: "Panel number (/roles list)", type: "integer", required: true }], local: "roles.delete" },
+    ],
+  },
+
+  // ── Moderation (moderation.ts, modlog.ts) ──
+  {
+    name: "mod",
+    description: "Moderation: warnings, timeouts, kicks, bans, purges and the server log",
+    subcommands: [
+      { name: "warn", description: "Warn a member (on their record, and by DM)", options: [user("Who", true), text("reason", "Why", true)], local: "mod.warn" },
+      { name: "timeout", description: "Time a member out", options: [user("Who", true), text("duration", "How long: 10m, 1h, 1d (up to 28d)", true), text("reason", "Why")], local: "mod.timeout" },
+      { name: "untimeout", description: "Lift a timeout", options: [user("Who", true), text("reason", "Why")], local: "mod.untimeout" },
+      { name: "kick", description: "Kick a member", options: [user("Who", true), text("reason", "Why")], local: "mod.kick" },
+      { name: "ban", description: "Ban someone", options: [user("Who", true), text("reason", "Why"), { name: "delete_days", description: "Delete their messages from the last … days (0-7)", type: "integer", min: 0, max: 7 }], local: "mod.ban" },
+      { name: "unban", description: "Unban someone (paste their user ID)", options: [user("Who", true), text("reason", "Why")], local: "mod.unban" },
+      { name: "purge", description: "Delete recent messages here", options: [{ name: "count", description: "How many (1-100)", type: "integer", required: true, min: 1, max: 100 }, user("Only this member's")], local: "mod.purge" },
+      { name: "cases", description: "A member's record", options: [user("Who", true)], local: "mod.cases" },
+      { name: "delcase", description: "Take a case off the record", options: [{ name: "case", description: "Case number", type: "integer", required: true, min: 1 }], local: "mod.delcase" },
+      {
+        name: "log",
+        description: "The server log channel (Manage Server)",
+        options: [
+          { name: "channel", description: "Where the log goes", type: "channel" },
+          flag("messages", "Also log deleted and edited messages"),
+          flag("members", "Also log joins and leaves"),
+          flag("off", "Turn the log off"),
+        ],
+        local: "mod.log",
+      },
+    ],
+  },
+
+  // ── The honeypot (honeypot.ts) ──
+  {
+    name: "honeypot",
+    description: "A trap channel: spam bots that post there are thrown out",
+    subcommands: [
+      {
+        name: "setup",
+        description: "Make (or pick) the honeypot channel (moderators)",
+        options: [
+          { name: "channel", description: "Use this channel (default: make #honeypot)", type: "channel" },
+          { name: "action", description: "What happens to whoever posts there", choices: [["Softban: out, messages deleted, may rejoin (default)", "softban"], ["Ban", "ban"], ["Kick", "kick"], ["Timeout for a day", "timeout"]] },
+        ],
+        local: "honeypot.setup",
+      },
+      { name: "off", description: "Stop the honeypot (moderators)", local: "honeypot.off" },
+      { name: "status", description: "The honeypot and how many it has caught", local: "honeypot.status" },
+    ],
+  },
+
+  // ── Security (security.ts) ──
+  {
+    name: "security",
+    description: "Anti-spam, anti-raid and anti-nuke (Manage Server)",
+    subcommands: [
+      { name: "status", description: "What's on", local: "security.status" },
+      {
+        name: "antispam",
+        description: "Time out floods and mass pings; delete invite links",
+        options: [
+          flag("enabled", "On or off"),
+          { name: "messages", description: "Messages that count as a flood (default 6)", type: "integer", min: 3, max: 30 },
+          { name: "seconds", description: "…within this many seconds (default 5)", type: "integer", min: 1, max: 60 },
+          { name: "mentions", description: "Most pings allowed in one message (default 5)", type: "integer", min: 1, max: 50 },
+          flag("invites", "Delete Discord invite links from members"),
+          { name: "timeout", description: "Timeout in minutes (default 10)", type: "integer", min: 1, max: 10080 },
+        ],
+        local: "security.antispam",
+      },
+      {
+        name: "antiraid",
+        description: "Kick everyone joining during a flood of joins; keep out new accounts",
+        options: [
+          flag("enabled", "On or off"),
+          { name: "joins", description: "Joins that count as a raid (default 10)", type: "integer", min: 3, max: 100 },
+          { name: "seconds", description: "…within this many seconds (default 10)", type: "integer", min: 1, max: 300 },
+          { name: "account_age", description: "Kick accounts younger than this many days (0 = off)", type: "integer", min: 0, max: 365 },
+        ],
+        local: "security.antiraid",
+      },
+      {
+        name: "antinuke",
+        description: "Strip the roles of anyone mass-deleting channels/roles or mass-banning",
+        options: [flag("enabled", "On or off"), { name: "limit", description: "Actions in a minute before they're stopped (default 3)", type: "integer", min: 2, max: 20 }],
+        local: "security.antinuke",
+      },
+      { name: "trust", description: "Never stop this member (pick again to untrust)", options: [user("Who", true)], local: "security.trust" },
+      { name: "raidmode", description: "Turn raid mode on or off by hand", options: [{ name: "state", description: "On or off", required: true, choices: ["on", "off"] }], local: "security.raidmode" },
     ],
   },
 

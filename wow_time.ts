@@ -33,7 +33,7 @@ export function timezoneLabel(zone: string): string {
 const partsFormat = new Map<string, Intl.DateTimeFormat>();
 
 /** The zone's wall clock at a UTC instant. */
-function wallClock(zone: string, utcMs: number) {
+export function wallClock(zone: string, utcMs: number) {
   let f = partsFormat.get(zone);
   if (!f) {
     f = new Intl.DateTimeFormat("en-US", {

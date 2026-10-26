@@ -1,7 +1,7 @@
 // Discord's HTTP API: verifying interactions and sending messages.
 //
-// Slash commands arrive as HTTPS POSTs (the Interactions endpoint), so no
-// Gateway connection is needed. Each is answered at once with "thinking…"
+// Slash commands arrive as HTTPS POSTs (the Interactions endpoint); the
+// Gateway (gateway.ts) is only for what happens outside them. Each is answered at once with "thinking…"
 // (a deferred response, which Discord requires within 3 seconds) and the
 // real reply is filled in afterwards through the interaction's webhook —
 // fights and 5e.tools lookups can take longer than 3 seconds.
@@ -83,12 +83,14 @@ function messageBody(m: OutMessage): BodyInit {
   return form;
 }
 
-/** One API call, retried once after a rate limit. Returns the parsed body, or null on failure. */
-async function call(method: string, path: string, body?: BodyInit, auth = true): Promise<any | null> {
+/** One API call, retried once after a rate limit. Returns the parsed body, or null on failure.
+ * `reason` goes in the server's audit log (moderation, security). */
+async function call(method: string, path: string, body?: BodyInit, auth = true, reason?: string): Promise<any | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const headers: Record<string, string> = {};
     if (auth) headers.Authorization = `Bot ${env("DISCORD_BOT_TOKEN")}`;
     if (typeof body === "string") headers["Content-Type"] = "application/json";
+    if (reason) headers["X-Audit-Log-Reason"] = encodeURIComponent(reason.slice(0, 400));
     const res = await fetch(`${API}${path}`, { method, headers, body });
     if (res.status === 429 && attempt === 0) {
       const wait = Number((await res.json().catch(() => ({})))?.retry_after ?? 1);
@@ -159,6 +161,23 @@ export async function guildName(guildId: string): Promise<string | null> {
   const g = await call("GET", `/guilds/${guildId}`);
   return g?.name ? String(g.name) : null;
 }
+
+/** Any other bot-token API call (roles, bans, invites…): the parsed body, or null on failure. */
+export async function api(method: string, path: string, body?: unknown, reason?: string): Promise<any | null> {
+  return await call(method, path, body === undefined ? undefined : JSON.stringify(body), true, reason);
+}
+
+export const addRole = async (guildId: string, userId: string, roleId: string, reason?: string) =>
+  (await api("PUT", `/guilds/${guildId}/members/${userId}/roles/${roleId}`, undefined, reason)) !== null;
+
+export const removeRole = async (guildId: string, userId: string, roleId: string, reason?: string) =>
+  (await api("DELETE", `/guilds/${guildId}/members/${userId}/roles/${roleId}`, undefined, reason)) !== null;
+
+export const deleteMessage = async (channelId: string, messageId: string, reason?: string) =>
+  (await api("DELETE", `/channels/${channelId}/messages/${messageId}`, undefined, reason)) !== null;
+
+/** A member of a server (roles, nick, joined_at, user), or null when they aren't in it. */
+export const getMember = async (guildId: string, userId: string): Promise<any | null> => await api("GET", `/guilds/${guildId}/members/${userId}`);
 
 /** Replaces every slash command (PUT /applications/{id}/commands, or one test server's). */
 export async function putCommands(appId: string, commands: unknown[], guildId?: string) {

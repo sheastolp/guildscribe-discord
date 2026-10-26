@@ -44,10 +44,21 @@ export const FEATURES: Record<string, { label: string; groups: string[] }> = {
   quotes: { label: "Quotes (/quote)", groups: ["quotes"] },
   wow: { label: "World of Warcraft: Forever (/wow: launch countdown, raid signups, invites, attendance)", groups: ["wowforever", "wowraid"] },
   live: { label: "Go-live alerts (/live: a post when a Twitch streamer goes live)", groups: ["livealerts"] },
+  levels: { label: "Levels (/rank, /levels: XP for chatting, level-up messages, role rewards)", groups: ["levels"] },
+  birthdays: { label: "Birthdays (/birthday: wishes and a birthday role on the day)", groups: ["birthdays"] },
+  raffles: { label: "Raffles (/raffle: button giveaways for real prizes)", groups: ["raffles"] },
+  invites: { label: "Invite tracking (/invites: who invited whom, leaderboards)", groups: ["invites"] },
+  notify: { label: "Feed alerts (/notify: YouTube uploads, subreddits, Bluesky, RSS)", groups: ["notify"] },
+  welcome: { label: "Welcome (/welcome: greetings, goodbyes, welcome DM, autoroles)", groups: ["welcome"] },
+  selfroles: { label: "Role panels (/roles: buttons members press to take roles)", groups: ["selfroles"] },
+  moderation: { label: "Moderation (/mod: warn, timeout, kick, ban, purge, cases, server log)", groups: ["moderation"] },
+  honeypot: { label: "Honeypot (/honeypot: a trap channel that throws out spam bots)", groups: ["honeypot"] },
+  security: { label: "Security (/security: anti-spam, anti-raid, anti-nuke)", groups: ["security"] },
 };
 
-/** Features a new server starts with off anyway (gambling is opt-in, as on Twitch). */
-const STARTS_OFF = new Set(["gamble"]);
+/** Features a new server starts with off anyway: gambling is opt-in, as on Twitch, and levels
+ * post level-ups in chat without anyone asking (a server may already run a levels bot). */
+const STARTS_OFF = new Set(["gamble", "levels"]);
 
 export async function ensureGuildTables() {
   await sqlite.execute(

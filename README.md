@@ -59,7 +59,12 @@ Discord ──POST /interactions──▶ interactions.ts ──▶ commands.ts 
   start-up it registers the slash commands if they changed.
 - **`wow.ts`** is Discord's own: WoW: Forever raid signups, invites and
   attendance (see below). The Twitch bot has nothing like it, so it isn't
-  synced.
+  synced. The same goes for `live.ts` and the community and safety modules
+  (see **Community and safety**).
+- **`gateway.ts`** keeps a WebSocket open to Discord's Gateway, so the bot
+  sees messages, joins, leaves and invites as well as slash commands. Levels,
+  invite tracking, welcome messages, the honeypot, security and the server
+  log run on it. `GATEWAY=0` turns it off.
 
 Every command is answered at once with "GuildScribe is thinking…", then
 filled in. Fights and first-time 5e.tools lookups can take longer than
@@ -81,6 +86,13 @@ fight's uncut battle log comes attached as `battle-log.txt`.
 | Tavern talk | `/fun coinflip\|flip\|jumble\|dadjoke\|fact\|pic…` `/askme` `/quote random\|show\|count\|add\|edit\|remove` |
 | WoW: Forever | `/wow forever` `/wow raid create\|list\|view\|invite\|edit\|remove\|cancel\|complete\|attendance\|loot` `/wow character` `/wow stats` `/wow top` `/wow timezone` |
 | Go-live alerts | `/live add\|remove\|list\|test` |
+| Feed alerts | `/notify add\|remove\|list\|test` (YouTube uploads, subreddits, Bluesky, any RSS feed) |
+| Levels | `/rank` `/levels top\|settings\|noxp\|set\|give\|reset` `/levels reward add\|remove\|list` |
+| Birthdays | `/birthday set\|remove\|show\|upcoming\|setup` |
+| Raffles | `/raffle start\|end\|reroll\|cancel\|list` |
+| Invites | `/invites show\|top\|who\|bonus\|log` |
+| Welcome & roles | `/welcome message\|leave\|dm\|autorole\|test\|status` `/roles panel\|list\|delete` |
+| Safety | `/mod warn\|timeout\|untimeout\|kick\|ban\|unban\|purge\|cases\|delcase\|log` `/honeypot setup\|off\|status` `/security status\|antispam\|antiraid\|antinuke\|trust\|raidmode` |
 | Anything else | `/gs command:!<any chat command>`: every command the Twitch bot's game answers, typed as on Twitch |
 
 Moderator means **Manage Server**, **Manage Messages** or **Administrator**.
@@ -105,7 +117,8 @@ That's where the Twitch bot checks "broadcaster or mod".
   triggers, timed messages, maps, game stats, NPCs and the chronicle, the
   Endless Delve, overlays, moderation tools, and everything else about Twitch
   chat or streams.
-- **Discord only:** WoW: Forever raid signups and Twitch go-live alerts (below).
+- **Discord only:** WoW: Forever raid signups, Twitch go-live alerts, and the
+  community and safety features (below).
 
 ## World of Warcraft: Forever raids
 
@@ -166,6 +179,39 @@ Twitch streamer goes live, like Streamcord's.
   Messages and Embed Links. To ping `@everyone` the bot also needs Mention
   Everyone there.
 
+## Community and safety
+
+What the server's other bots did, built in. Each is its own feature
+(`/guildscribe feature`), so a server can keep using another bot for any of
+them. All are on in a new server except **levels**, which posts level-ups in
+chat by itself and so waits for a moderator: `/guildscribe feature name:levels state:on`.
+The rest do nothing until a moderator sets them up.
+
+| Instead of | GuildScribe | Module |
+|------------|-------------|--------|
+| Arcane | `/rank`, `/levels`: 15–25 XP per message (once a minute), the Arcane/MEE6 curve (5L² + 50L + 100 per level), level-up messages (where they chatted, DM, one channel, or off), role rewards (stacked or highest only), no-XP channels and roles, leaderboard | `levels.ts` |
+| Birthday Bot | `/birthday`: members save month and day (year optional, for `{age}`); on the day, from a set hour in the server's timezone, a wish in the birthday channel and a birthday role that comes off when the day ends. 29 February is the 28th in other years | `birthdays.ts` |
+| GiveawayBot | `/raffle`: a card with a 🎉 button, a timer, several winners, an optional required role, reroll and cancel. (`/giveaway` stays the game's gold giveaway.) | `raffles.ts` |
+| Honeypot | `/honeypot setup` makes a `#honeypot` channel with a warning. Whoever posts in it (not moderators or bots) is softbanned (out, with their last hour of messages deleted everywhere, free to rejoin), banned, kicked or timed out | `honeypot.ts` |
+| Invite Tracker | `/invites`: who invited whom, counts (joined − left − fake + bonus; fake = an account under a week old), leaderboard, a join announcement channel | `invites.ts` |
+| NotifyMe | `/notify`: posts when a YouTube channel uploads, a subreddit or Bluesky account posts, or any RSS/Atom feed updates. Checked every 5 minutes; adding a feed never posts its back catalogue | `notify.ts` |
+| Sapphire | `/welcome` (greeting, goodbye, welcome DM, up to 5 autoroles, membership screening respected), `/roles panel` (button self-roles, toggle or one-at-a-time), `/mod` (warn, timeout, kick, ban, unban, purge; numbered cases with DMs and audit-log reasons; Discord's role ladder enforced), `/mod log` (a server log: mod actions, plus deleted and edited messages and joins and leaves if wanted) | `welcome.ts`, `selfroles.ts`, `moderation.ts`, `modlog.ts` |
+| Security | `/security antispam` (floods and mass pings timed out, invite links deleted), `antiraid` (a burst of joins starts 10 minutes of raid mode, kicking everyone joining; minimum account age), `antinuke` (anyone mass-deleting channels or roles, or mass-banning or kicking, loses every role, a bot is kicked, the owner gets a DM), `trust` | `security.ts` |
+| Streamcord | `/live` (see **Go-live alerts**) | `live.ts` |
+| Jockie Music | **Not built in.** Playing music needs a voice connection, and Discord now requires end-to-end encrypted voice (DAVE) for bots, which isn't something to hand-roll next to a game bot. Keep Jockie for music. | |
+
+Placeholders in messages: levels `{user} {level}`; birthdays `{user} {age}`;
+welcome `{user} {username} {server} {count} {inviter}`; invite log
+`{user} {inviter} {invites} {code}`; feeds `{title} {url} {author} {source}`.
+`-` puts a message back to its default.
+
+Safety actions are numbered cases in `/mod cases` and go to the `/mod log`
+channel. GuildScribe can only act on members whose highest role is below its
+own, so for the honeypot, security and moderation move its role near the top.
+
+Jobs: raffles are drawn every minute; birthdays and feeds are checked every
+5 minutes (`NOTIFY_CRON_MINUTES`).
+
 ## Setting it up
 
 ### 1. The Discord application
@@ -173,11 +219,21 @@ Twitch streamer goes live, like Streamcord's.
 1. https://discord.com/developers/applications → your GuildScribe app (or
    **New Application**).
 2. **General Information:** copy the **Application ID** and **Public Key**.
-3. **Bot:** **Reset Token** and copy it. No privileged intents are needed.
+3. **Bot:** **Reset Token** and copy it. Under **Privileged Gateway Intents**,
+   switch on **Server Members Intent** and **Message Content Intent** (invite
+   tracking, welcome messages, autoroles, anti-raid, the invite-link filter
+   and message logs need them). Without them the bot still connects, says in
+   its log what's missing, and everything else works.
 4. **Installation:** under Guild Install, add the scopes `applications.commands`
-   and `bot`, with the permissions **Send Messages**, **Embed Links** and
-   **Attach Files** (raid cards are embeds).
-   Open the install link to add it to a server.
+   and `bot`, with the permissions **Send Messages**, **Embed Links**,
+   **Attach Files** and **Read Message History**, plus, for the community and
+   safety features, **Manage Roles**, **Manage Channels**, **Manage Server**
+   (Discord only shows invites to it), **Manage Messages**, **Kick Members**,
+   **Ban Members**, **Timeout Members** and **View Audit Log**. (Or
+   **Administrator**.) Open the install link to add it to a server, then drag
+   GuildScribe's role near the top of the role list.
+   A server that already has it gets the new permissions by opening the new
+   install link again.
 
 ### 2. Run it on the Yoga laptop
 
@@ -268,6 +324,12 @@ Discord API: buttons, the bench, DM invites, reminders, the close-out,
 loot and stats, plus start-time parsing across daylight saving.
 `test/live_test.ts` runs go-live alerts against a fake Twitch: going live,
 a game change, a dropped stream coming back, the end card and `@everyone`.
+`test/community_test.ts` runs levels, birthdays, raffles, invite tracking,
+welcome messages, role panels, moderation, the honeypot, security, feed
+alerts and the server log, handing Gateway events straight to the bot.
+`test/gateway_test.ts` connects to a fake Gateway: identify, heartbeats,
+an event reaching its handler, and falling back when Discord refuses the
+privileged intents.
 `SHOW=1` prints every reply.
 
 ## The old Val Town version
