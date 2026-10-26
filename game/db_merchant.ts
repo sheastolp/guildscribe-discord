@@ -3,6 +3,7 @@
 // Split out of db.ts (which re-exports everything here) to keep files a manageable size.
 
 import { sqlite } from "./sqlite.ts";
+import type { MerchantItem } from "./gear.ts";
 
 export async function isMerchantEnabled(broadcasterId: string) {
   const res = await sqlite.execute("SELECT enabled FROM merchant_settings WHERE broadcaster_id = ?", [broadcasterId]);
@@ -24,30 +25,46 @@ export interface MerchantListing {
   priceText: string;
   postedAt: number;
   haggledBy: string[];
+  /** The ware of a one-time sale (merchant_sale.ts); null for a catalog item. */
+  customItem: MerchantItem | null;
 }
 
 /** Called right after a merchant ad successfully posts — records what's now
- * on offer for !haggle, replacing whatever was listed before. */
-export async function setMerchantListing(broadcasterId: string, merchantName: string, itemDesc: string, priceText: string) {
+ * on offer for !haggle, replacing whatever was listed before. Pass
+ * `customItem` for a one-time sale whose ware isn't in the gear.ts catalog. */
+export async function setMerchantListing(
+  broadcasterId: string,
+  merchantName: string,
+  itemDesc: string,
+  priceText: string,
+  customItem: MerchantItem | null = null,
+) {
   await sqlite.execute(
-    "INSERT OR REPLACE INTO merchant_listings (broadcaster_id, merchant_name, item_desc, price_text, posted_at, haggled_by) VALUES (?,?,?,?,?,'[]')",
-    [broadcasterId, merchantName, itemDesc, priceText, Date.now()],
+    "INSERT OR REPLACE INTO merchant_listings (broadcaster_id, merchant_name, item_desc, price_text, posted_at, haggled_by, custom_item) VALUES (?,?,?,?,?,'[]',?)",
+    [broadcasterId, merchantName, itemDesc, priceText, Date.now(), customItem ? JSON.stringify(customItem) : null],
   );
 }
 
 export async function getMerchantListing(broadcasterId: string): Promise<MerchantListing | null> {
   const res = await sqlite.execute(
-    "SELECT merchant_name, item_desc, price_text, posted_at, haggled_by FROM merchant_listings WHERE broadcaster_id = ?",
+    "SELECT merchant_name, item_desc, price_text, posted_at, haggled_by, custom_item FROM merchant_listings WHERE broadcaster_id = ?",
     [broadcasterId],
   );
   if (!res.rows.length) return null;
   const r: any = res.rows[0];
+  let customItem: MerchantItem | null = null;
+  try {
+    customItem = r.custom_item ? JSON.parse(r.custom_item) : null;
+  } catch {
+    customItem = null;
+  }
   return {
     merchantName: r.merchant_name,
     itemDesc: r.item_desc,
     priceText: r.price_text,
     postedAt: Number(r.posted_at),
     haggledBy: JSON.parse(r.haggled_by || "[]"),
+    customItem,
   };
 }
 
