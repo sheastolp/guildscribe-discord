@@ -1,0 +1,439 @@
+// Hunt and Hoard — the Wandering Clerk's hunting-and-shopping game, ported
+// from the standalone Hunt & Hoard bot and merged into GuildScribe's combat
+// (the "Monster hunts" switch, commandgroups.ts). Rebuilt on GuildScribe's
+// own systems:
+//
+//   heroes    the GuildScribe character sheet (!createchar) — no separate
+//             !enlist. Level, XP, HP and gear are the sheet's.
+//   monsters  the channel's live bestiary (bestiary.ts): level-scaled, adapted,
+//             and every hunt teaches the monster like any other fight.
+//   combat    simulateMonsterFight (battle.ts), the same engine as
+//             !dndduel and !autohunt, gated by the channel's hunting cooldown.
+//   rewards   awardMonsterXp + awardMonsterLoot (characters.ts / loot.ts),
+//             paid into the gold wallet (points_db.ts).
+//   gear      the peddler catalog (gear.ts): bought gear is baked onto the
+//             sheet with applyGear, exactly like a !haggle purchase.
+//
+// What Hunt & Hoard adds on top:
+//   - A merchant stall: three offers of peddler gear, bought with coin. Each
+//     ware sells once (first buyer wins); sold slots stay empty until the
+//     whole stall turns over every 20 minutes.
+//   - A pack: !inv. Potions no longer heal or sell on the stall (every fight
+//     starts at full HP); any left from before can be sold or dropped.
+//   - A bounty board: three "slay N of X" postings drawn from the bestiary's
+//     easy end. Every monster kill counts (creditBounty is called from the
+//     solo/party duel, autohunt and raid code); whoever finishes one first is
+//     paid and the posting is replaced.
+//   - A "Next:" hint on most replies saying what to do next.
+//
+// Switched by "Monster hunts" (off by default). While it's off, or if the
+// channel has a custom command with the same name (e.g. its own !shop),
+// these words fall through untouched.
+//
+//   !hoard                   your status + next step
+//   !hunt [monster]          hunt a random level-fit foe, or a named one
+//   !bounties | !quests      the bounty board and your progress
+//   !shop | !merchant [#|name]  the stall, or one ware's details and lore
+//   !buy <#|name|1 3|all>    buy one, several or every ware (each sells once)
+//   !inv | !inventory        your gear (and any old potions)
+//   !sell <potion> | !drop <potion>  get rid of an old potion
+//   !purse | !coinpurse      your coin and what it can buy
+//   !ledger [@user]          a hero's Hunt and Hoard sheet
+
+import { getCharacter, getCustomCommand, isCommandGroupEnabled, saveCharacter } from "./db.ts";
+import { sendChatMessage, sendChatMessages } from "./twitch.ts";
+import { summonMonster, recordMonsterOutcome, tierTag } from "./bestiary.ts";
+import { recordBattle } from "./battle_log.ts";
+import { simulateMonsterFight } from "./battle.ts";
+import { awardMonsterXp } from "./characters.ts";
+import { awardMonsterLoot, lootSummary, soloLootNote } from "./loot.ts";
+import { claimHunt, waitText } from "./huntcooldown.ts";
+import { fightSummary, hpLeft } from "./whisper.ts";
+import { duelNarration } from "./narration.ts";
+import { withArticle } from "./combat_shared.ts";
+import { applyGear, effectText, ownsGear } from "./gear.ts";
+import { formatCoins } from "./coins.ts";
+import { adjustBalance, canEarnGold, getBalance, isPointsEnabled, trySpend } from "./points_db.ts";
+import { formatRaceName, heroAc, pick } from "./utils.ts";
+import type { Character } from "./types.ts";
+import {
+  type Bounty,
+  findPackPotion,
+  getBoard,
+  getPlayer,
+  getStall,
+  getStallState,
+  claimOffer,
+  type StallOffer,
+  type HoardPlayer,
+  resolveOffer,
+  type ResolvedOffer,
+  rerollBounty,
+  savePlayer,
+} from "./hoard_db.ts";
+import { LORE_TEMPLATES, POTIONS, SELL_BACK_SHARE } from "./hoard_data.ts";
+
+/** Every word here is switched by the "Monster hunts" group (commandgroups.ts). */
+const HUNT_GROUP = "hunts";
+const WORDS = new Set([
+  "hoard", "hunt", "ledger", "bounties", "quests",
+  "shop", "merchant", "buy", "sell", "drop", "inv", "inventory", "purse", "coinpurse",
+]);
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// ── The "Next:" hint ──
+
+async function nextStep(broadcasterId: string, username: string, c: Character | null, p: HoardPlayer): Promise<string> {
+  if (!c) return "Next: !createchar to roll up a hero.";
+  if (await isPointsEnabled(broadcasterId)) {
+    const [bal, stall] = await Promise.all([getBalance(broadcasterId, username), getStall(broadcasterId)]);
+    const coin = bal?.balance ?? 0;
+    const offers = stall.map(resolveOffer);
+    const i = offers.findIndex((o) => o && o.price <= coin && !ownsGear(c, o.gear));
+    if (i >= 0) return `Next: !buy ${i + 1} — you can afford the ${offers[i]!.name} (${formatCoins(offers[i]!.price)}).`;
+  }
+  const board = await getBoard(broadcasterId);
+  const open = board.find((b) => (p.progress[b.id] ?? 0) > 0) ?? board[0];
+  return `Next: !hunt for XP and loot${open ? ` (bounty: !hunt ${open.monster})` : ""}, or !autohunt to chain fights.`;
+}
+
+// ── Bounties ──
+
+function describeBounty(b: Bounty, progress: number): string {
+  return `Slay ${b.target} ${b.monster}${b.target === 1 ? "" : "s"} (CR ${b.cr}) ${Math.min(progress, b.target)}/${b.target} → ${formatCoins(b.reward)}`;
+}
+
+/**
+ * Logs one kill of `monsterName` toward the board, paying out and reposting
+ * the slot the moment a hero finishes it. Returns a short note for the reply
+ * ("" when no bounty matched or monster hunts are off). Also called by every
+ * monster fight: combat_monster.ts, combat_partyduel.ts, autohunt.ts, raid.ts. `player` lets the caller save once.
+ */
+export async function creditBounty(
+  broadcasterId: string,
+  username: string,
+  monsterName: string,
+  player?: HoardPlayer,
+): Promise<string> {
+  if (!(await isCommandGroupEnabled(broadcasterId, HUNT_GROUP))) return "";
+  const board = await getBoard(broadcasterId);
+  const index = board.findIndex((b) => b.monster.toLowerCase() === monsterName.toLowerCase());
+  if (index < 0) return "";
+  const b = board[index];
+  const p = player ?? (await getPlayer(broadcasterId, username));
+  const kills = (p.progress[b.id] ?? 0) + 1;
+  let note: string;
+  if (kills >= b.target) {
+    delete p.progress[b.id];
+    const paid: string[] = [];
+    if (await canEarnGold(broadcasterId)) { // no coin while offline
+      await adjustBalance(broadcasterId, username, username, b.reward);
+      paid.push(formatCoins(b.reward));
+    }
+    await rerollBounty(broadcasterId, board, index);
+    note = ` 📜 Bounty fulfilled — the ${b.monster} contract pays ${paid.join(" and ") || "in glory"}! A fresh posting goes up.`;
+  } else {
+    p.progress[b.id] = kills;
+    note = ` 📜 Bounty: ${b.monster} ${kills}/${b.target}.`;
+  }
+  if (!player) await savePlayer(broadcasterId, username, p);
+  return note;
+}
+
+// ── Formatting ──
+
+function offerLine(o: ResolvedOffer, i: number): string {
+  const what = effectText(o.gear.effect) + (o.legendary ? ", ★ legendary" : "");
+  return `#${i + 1} ${o.name} (${what}) — ${formatCoins(o.price)} [${o.merchant}]`;
+}
+
+function lore(o: ResolvedOffer): string {
+  return pick(LORE_TEMPLATES).split("{owner}").join(o.merchant).split("{item}").join(o.name).split("{desc}").join(o.pitch);
+}
+
+function sheetLine(c: Character, name: string, coin: number | null): string {
+  const ac = heroAc(c, 11).ac;
+  return `${name} — Lv ${c.level} ${formatRaceName(c.race, c.subrace)} ${c.cls} | ${c.hpMax} HP | AC ${ac} | XP ${c.xp ?? 0}` +
+    (coin !== null ? ` | 🪙 ${formatCoins(coin)}` : "") + ` | ${plural((c.items ?? []).length, "item")} on the sheet`;
+}
+
+function findOffer(offers: Array<ResolvedOffer | null>, needle: string): number {
+  const t = needle.trim().replace(/^#/, "");
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    return n >= 1 && n <= offers.length && offers[n - 1] ? n - 1 : -1;
+  }
+  const q = t.toLowerCase();
+  return offers.findIndex((o) => o && o.name.toLowerCase().includes(q));
+}
+
+// ── Command handler ──
+
+export async function handleHoardCommand(
+  chatMessage: string,
+  chatter: string,
+  display: string,
+  broadcasterId: string,
+): Promise<boolean> {
+  const m = chatMessage.trim().match(/^!([a-z]+)(?:\s+(.*))?$/i);
+  if (!m) return false;
+  const word = m[1].toLowerCase();
+  const arg = (m[2] ?? "").trim();
+  if (!WORDS.has(word)) return false;
+  const say = (text: string) => sendChatMessage(`@${display} ${text}`, broadcasterId);
+
+  // A channel's own command with the same name wins.
+  const custom = await getCustomCommand(broadcasterId, word);
+  if (custom && Number(custom.enabled ?? 1) === 1) return false;
+  if (!(await isCommandGroupEnabled(broadcasterId, HUNT_GROUP))) return false;
+
+  const [c, p] = await Promise.all([getCharacter(chatter, broadcasterId), getPlayer(broadcasterId, chatter)]);
+  const noHero = "the Clerk can't find you in the ledger — roll up a hero with !createchar first.";
+  const goldOn = await isPointsEnabled(broadcasterId);
+  const goldOff = "the stall only deals in coin, and gold is switched off in this channel (a mod can turn it on with !gold on).";
+
+  switch (word) {
+    case "hoard": {
+      if (!c) {
+        await say(`⚔️💰 Welcome to the hunt! Roll up a hero with !createchar, then !hunt monsters for XP and loot, fill bounties (!bounties) and spend it at the stall (!shop).`);
+        return true;
+      }
+      const bal = goldOn ? (await getBalance(broadcasterId, chatter))?.balance ?? 0 : null;
+      await say(`The ledger reads: ${sheetLine(c, display, bal)}. ${await nextStep(broadcasterId, chatter, c, p)}`);
+      return true;
+    }
+
+    case "ledger": {
+      const target = arg.replace(/^@/, "").toLowerCase();
+      if (!target || target === chatter.toLowerCase()) {
+        if (!c) return say(noHero).then(() => true);
+        const bal = goldOn ? (await getBalance(broadcasterId, chatter))?.balance ?? 0 : null;
+        await say(`${sheetLine(c, display, bal)}. ${await nextStep(broadcasterId, chatter, c, p)}`);
+        return true;
+      }
+      if (!/^[a-z0-9_]{1,25}$/.test(target)) return say("usage: !ledger or !ledger @username").then(() => true);
+      const other = await getCharacter(target, broadcasterId);
+      if (!other) return say(`no ledger entry for ${target}.`).then(() => true);
+      const bal = goldOn ? (await getBalance(broadcasterId, target))?.balance ?? 0 : null;
+      await say(`${target}'s ledger: ${sheetLine(other, target, bal)}.`);
+      return true;
+    }
+
+    case "hunt": {
+      if (!c) return say(noHero).then(() => true);
+      const monster = await summonMonster(broadcasterId, c.level, arg || null);
+      if (!monster) {
+        await say(`no quarry known as "${arg}". Check !bounties for the board, !bestiary for every huntable monster, or !hunt with no name and let fate pick.`);
+        return true;
+      }
+      if (!(await claimHunt(broadcasterId, [chatter], display, { self: chatter }))) return true;
+
+      // Starts at full HP; wounds don't carry over to the next fight.
+      const fight = simulateMonsterFight(c, chatter, monster);
+      const learnNote = await recordMonsterOutcome(broadcasterId, monster.name, fight.won, c.level);
+      await recordBattle(broadcasterId, { kind: "hunt", side: display, foe: monster.name, outcome: fight.won ? "win" : "loss" });
+
+      let rewards = "";
+      let loot = "";
+      let bounty = "";
+      if (fight.won) {
+        const xp = await awardMonsterXp(chatter, monster.cr, broadcasterId);
+        if (xp) rewards += ` +${xp.gained} XP${xp.leveledTo ? ` — 🎉 leveled up to ${xp.leveledTo}!` : ""}`;
+        const paid = await awardMonsterLoot([chatter], monster.cr, broadcasterId);
+        rewards += soloLootNote(paid);
+        loot = lootSummary(paid);
+        bounty = await creditBounty(broadcasterId, chatter, monster.name, p);
+        await savePlayer(broadcasterId, chatter, p);
+      }
+      // awardMonsterXp re-saves the sheet (a level-up raises max HP).
+      const after = (await getCharacter(chatter, broadcasterId)) ?? c;
+      const hpLeftNow = Math.max(0, fight.playerHp);
+      const shownLog = fight.battle.render();
+      const outcome = fight.won
+        ? `${display} prevails! ${duelNarration("victory")}${rewards}${bounty}`
+        : `${monster.name} wins — ${display} limps home to recover. ${duelNarration("defeat")}`;
+      const msg = `@${display} ⚔️ The Clerk sends you after ${withArticle(monster.name)} (CR ${monster.cr}${tierTag(monster.tier)}, AC ${monster.ac}, HP ${monster.hp}). ` +
+        `${shownLog} — ${outcome} HP ${hpLeftNow}/${after.hpMax}.${learnNote} ${await nextStep(broadcasterId, chatter, after, p)}`;
+      await sendChatMessages(msg, broadcasterId, {
+        detail: msg.replace(shownLog, fight.battle.renderDetailed()),
+        names: [chatter],
+        summary: fightSummary({
+          fighter: display,
+          enemy: monster.name,
+          outcome: fight.won ? `${display} wins!` : `${monster.name} wins.`,
+          hp: hpLeft([[display, hpLeftNow, after.hpMax], [monster.name, fight.monsterHp, monster.hp]]),
+          loot,
+        }) + bounty,
+      });
+      return true;
+    }
+
+    case "bounties":
+    case "quests": {
+      const board = await getBoard(broadcasterId);
+      const list = board.map((b, i) => `#${i + 1} ${describeBounty(b, p.progress[b.id] ?? 0)}`).join(" | ");
+      await say(`📜 The bounty board reads: ${list}. ${c ? `Take one on with !hunt <monster>, e.g. !hunt ${board[0].monster}.` : "Roll up a hero with !createchar to start logging kills."}`);
+      return true;
+    }
+
+    case "shop":
+    case "merchant": {
+      const { offers: stall, turnsOverInMs } = await getStallState(broadcasterId);
+      const offers = stall.map(resolveOffer);
+      if (arg) {
+        const i = findOffer(offers, arg);
+        if (i >= 0) {
+          const o = offers[i]!;
+          const effect = `${effectText(o.gear.effect)}, permanent once bought`;
+          await say(`🛒 ${o.name} — ${effect} — ${formatCoins(o.price)}. 📖 ${lore(o)} !buy ${i + 1} to take it.`);
+          return true;
+        }
+        await say(`nothing on the stall matches "${arg}". !shop to see today's wares.`);
+        return true;
+      }
+      const list = offers.map((o, i) => (o ? offerLine(o, i) : `#${i + 1} — sold${stall[i].soldTo ? ` to ${stall[i].soldTo}` : " out"}`)).join(" | ");
+      const left = offers.filter(Boolean).length;
+      await say(`🛒 Today's wares: ${list}. ${left ? "!buy <#>, several (!buy 1 3) or !buy all; !shop <#> for details. " : ""}Each ware sells once — the stall turns over in ${waitText(turnsOverInMs)}.${goldOn ? "" : " (Gold is off in this channel, so the stall can't sell.)"}`);
+      return true;
+    }
+
+    case "buy": {
+      const { offers: stall, turnsOverInMs } = await getStallState(broadcasterId);
+      const offers = stall.map(resolveOffer);
+      const restock = `The stall turns over in ${waitText(turnsOverInMs)}.`;
+      if (!arg) {
+        const list = offers.map((o, i) => (o ? offerLine(o, i) : "")).filter(Boolean).join(" | ");
+        await say(list ? `buy which? ${list} — !buy <#>, several (!buy 1 3) or !buy all.` : `the stall is sold out. ${restock}`);
+        return true;
+      }
+      if (!goldOn) return say(goldOff).then(() => true);
+
+      // "all" | "1 3" | "1,3" | "#2" → slot numbers; anything else is one ware's name.
+      const nums = arg.split(/[\s,]+/).map((t) => t.replace(/^#/, ""));
+      let picks: number[];
+      if (/^all$/i.test(arg)) {
+        picks = stall.map((_, i) => i).filter((i) => !stall[i].soldTo);
+        if (!picks.length) return say(`the stall is sold out. ${restock}`).then(() => true);
+      } else if (nums.every((t) => /^\d+$/.test(t))) {
+        picks = [...new Set(nums.map((t) => Number(t) - 1))];
+        const bad = picks.filter((i) => i < 0 || i >= stall.length);
+        if (bad.length) return say(`the stall only has slots 1–${stall.length}. !shop to see them.`).then(() => true);
+      } else {
+        const i = findOffer(offers, arg);
+        if (i < 0) {
+          const sold = stall.findIndex((o) => o.soldTo && resolveOffer({ ...o, soldTo: undefined })?.name.toLowerCase().includes(arg.toLowerCase()));
+          await say(sold >= 0 ? `the ${resolveOffer({ ...stall[sold], soldTo: undefined })!.name} already sold to ${stall[sold].soldTo}. ${restock}` : `no ware on the stall matches "${arg}". !shop to see what's on offer.`);
+          return true;
+        }
+        picks = [i];
+      }
+
+      const bought: Array<{ o: ResolvedOffer; detail: string }> = [];
+      const skipped: string[] = [];
+      let gearChanged = false;
+      for (const i of picks) {
+        const slot: StallOffer = stall[i];
+        const label = `#${i + 1}`;
+        if (slot.soldTo) {
+          skipped.push(`${label} already sold to ${slot.soldTo}`);
+          continue;
+        }
+        const o = offers[i];
+        if (!o) {
+          skipped.push(`${label} is no longer stocked`);
+          continue;
+        }
+        if (!c) {
+          skipped.push(`${o.name} (gear needs a character — !createchar)`);
+          continue;
+        }
+        if (ownsGear(c, o.gear)) {
+          skipped.push(`${o.name} (you already carry one)`);
+          continue;
+        }
+        if (!(await trySpend(broadcasterId, chatter, o.price))) {
+          skipped.push(`${o.name} (${formatCoins(o.price)} — not enough coin)`);
+          continue;
+        }
+        // Pay first, then claim; if someone else got there first, refund.
+        const winner = await claimOffer(broadcasterId, i, slot, chatter);
+        if (winner !== chatter) {
+          await adjustBalance(broadcasterId, chatter, display, o.price);
+          skipped.push(winner ? `${o.name} (${winner} bought it first)` : `${o.name} (the stall just turned over)`);
+          continue;
+        }
+        const { applied, changes } = applyGear(c, o.gear);
+        gearChanged = true;
+        bought.push({ o, detail: `on your sheet: ${effectText(applied) || "a fine curio"}${changes ? ` (${changes})` : ""}` });
+      }
+      if (gearChanged) await saveCharacter(c!, broadcasterId);
+
+      const skipText = skipped.length ? ` Skipped: ${skipped.join("; ")}.` : "";
+      if (!bought.length) {
+        const have = (await getBalance(broadcasterId, chatter))?.balance ?? 0;
+        await say(`nothing bought.${skipText} Your purse holds ${formatCoins(have)}.`);
+        return true;
+      }
+      const total = bought.reduce((t, b) => t + b.o.price, 0);
+      const head = bought.length === 1
+        ? `🛒 the ${bought[0].o.name} changes hands — bought from ${bought[0].o.merchant} for ${formatCoins(total)}, ${bought[0].detail}.`
+        : `🛒 you buy ${bought.length} wares for ${formatCoins(total)}: ${bought.map((b) => `${b.o.name} (${b.detail})`).join("; ")}.`;
+      await say(`${head}${skipText} Each ware sells once; ${restock} ${await nextStep(broadcasterId, chatter, c, p)}`);
+      return true;
+    }
+
+    case "inv":
+    case "inventory": {
+      if (!c) return say(noHero).then(() => true);
+      const potions = POTIONS.filter((x) => p.potions[x.key]).map((x) => `${x.name}${p.potions[x.key] > 1 ? ` x${p.potions[x.key]}` : ""}`);
+      const gear = (c.items ?? []).length;
+      const old = potions.length ? ` Old potions (they no longer heal — !sell or !drop them): ${potions.join(", ")}.` : "";
+      await say(`🎒 Gear: ${plural(gear, "item")} on your sheet, always in effect (!gear to list it).${old} ${await nextStep(broadcasterId, chatter, c, p)}`);
+      return true;
+    }
+
+    case "sell":
+    case "drop": {
+      if (!c) return say(noHero).then(() => true);
+      const potion = findPackPotion(p, arg);
+      if (!potion) {
+        const gearHit = arg && (c.items ?? []).some((line) => line.toLowerCase().includes(arg.toLowerCase()));
+        const have = POTIONS.filter((x) => p.potions[x.key]).map((x) => x.name).join(", ") || "no potions";
+        await say(gearHit
+          ? "gear is bound to your character sheet and always in effect — it can't be sold or dropped."
+          : `${arg ? `nothing in your pack matches "${arg}".` : `${word} which potion?`} You carry: ${have}.`);
+        return true;
+      }
+      if (word === "sell" && !goldOn) return say(goldOff).then(() => true);
+      // Selling turns a potion into fresh coin, so it's closed while offline like every other way to earn.
+      if (word === "sell" && !(await canEarnGold(broadcasterId))) return say("the stall doesn't buy back while the stream is offline — come back when it's live.").then(() => true);
+      p.potions[potion.key] -= 1;
+      if (word === "sell") {
+        const price = Math.max(1, Math.floor(potion.price * SELL_BACK_SHARE));
+        await savePlayer(broadcasterId, chatter, p);
+        await adjustBalance(broadcasterId, chatter, display, price);
+        await say(`you sell the ${potion.name} back to the stall for ${formatCoins(price)}.`);
+      } else {
+        await savePlayer(broadcasterId, chatter, p);
+        await say(`the ${potion.name} is left behind on the road.`);
+      }
+      return true;
+    }
+
+    case "purse":
+    case "coinpurse": {
+      if (!goldOn) return say("gold is switched off in this channel, so there's no purse to check.").then(() => true);
+      const coin = (await getBalance(broadcasterId, chatter))?.balance ?? 0;
+      const offers = (await getStall(broadcasterId)).map(resolveOffer).filter((o): o is ResolvedOffer => !!o);
+      const cheapest = [...offers].sort((a, b) => a.price - b.price)[0];
+      const afford = offers.filter((o) => o.price <= coin).sort((a, b) => a.price - b.price)[0];
+      const tail = afford
+        ? ` Enough for the ${afford.name} (${formatCoins(afford.price)}) — !buy it.`
+        : cheapest ? ` ${formatCoins(cheapest.price - coin)} short of the cheapest ware (${cheapest.name}).` : "";
+      await say(`💰 your purse holds ${formatCoins(coin)}.${tail}`);
+      return true;
+    }
+  }
+  return false;
+}

@@ -1,0 +1,70 @@
+// GuildScribe — open-stall merchant, periodic posting.
+// Run on an interval by server.ts (MERCHANT_CRON_MINUTES, default 5). The actual per-channel posting cadence is
+// randomized (see MERCHANT_MIN/MAX_INTERVAL_MINUTES in merchant.ts) and
+// tracked per-broadcaster in the merchant_settings table via next_post_at,
+// so a frequent tick here just checks who's due rather than posting on
+// every run.
+
+import { ensureTables, getDueMerchantChannels, rescheduleMerchant, recordMonitorEvent, recordMerchantCronRun, setBroadcasterLiveStatus, setMerchantListing } from "./db.ts";
+import { fetchIsChannelLiveNow, sendChatMessage } from "./twitch.ts";
+import { rollMerchantOffer, randomMerchantIntervalMs } from "./merchant.ts";
+
+export default async function () {
+  await ensureTables();
+  const now = Date.now();
+  const due = await getDueMerchantChannels(now);
+  let postsOk = 0;
+  let postsFailed = 0;
+  let postsSkippedOffline = 0;
+
+  for (const { broadcasterId, isLive: isLiveDb } of due) {
+    try {
+      // broadcasters.is_live only moves when a stream.online/offline
+      // notification arrives; if Twitch never delivered one (callback moved,
+      // secret changed, subscription lapsed) it stays 0 for good and the
+      // peddler would never post again. Before skipping, ask Twitch directly
+      // — one call per due channel, at most every 25-60 min — and heal the
+      // column so the timed-message and autohunt crons pick it up too.
+      let isLive = isLiveDb;
+      if (!isLive && await fetchIsChannelLiveNow(broadcasterId)) {
+        isLive = true;
+        await setBroadcasterLiveStatus(broadcasterId, true);
+        await recordMonitorEvent("merchant_live_healed", `${broadcasterId}: is_live was 0 but Twitch says live`);
+      }
+      // Skip posting (but still reschedule below) while the channel is
+      // offline — no point hawking wares to an empty chat. isLive comes
+      // straight from the query (broadcasters.is_live), kept current by the
+      // stream.online/offline EventSub notifications in main.ts, so this is
+      // a plain column read, not a Twitch API call. Not counted as an
+      // ok/failed post so /admin/merchant/status doesn't read this as a
+      // real send.
+      if (!isLive) {
+        postsSkippedOffline++;
+      } else {
+        const offer = rollMerchantOffer();
+        if (await sendChatMessage(offer.ad, broadcasterId)) {
+          postsOk++;
+          // Persisted so !haggle (haggle.ts) knows what's currently on
+          // offer; each new ad overwrites the previous listing.
+          await setMerchantListing(broadcasterId, offer.merchantName, offer.itemDesc, offer.priceText);
+        } else {
+          postsFailed++;
+        }
+      }
+    } catch (e) {
+      postsFailed++;
+      await recordMonitorEvent("merchant_post_error", `${broadcasterId}: ${String(e)}`);
+    }
+    // Always reschedule, even on a send failure, so one bad channel can't
+    // wedge the cron into retrying it every tick forever.
+    await rescheduleMerchant(broadcasterId, now + await randomMerchantIntervalMs(broadcasterId));
+  }
+
+  // Recorded even when nothing was due, so GET /admin/merchant/status can
+  // tell "cron ticked, nobody due" apart from "cron hasn't ticked in a while".
+  await recordMerchantCronRun(due.length, postsOk, postsFailed);
+
+  console.log(
+    `GuildScribe merchant cron: posted to ${postsOk} of ${due.length} due channel(s) (${postsSkippedOffline} skipped offline, ${postsFailed} failed)`,
+  );
+}

@@ -1,0 +1,347 @@
+// D&D 5e API lookups and formatting. dnd5eapi.co (the SRD) first; 5e.tools
+// (every official 2014 book, see fivetools.ts) for monsters, spells, items,
+// feats and races the SRD doesn't have.
+
+import { lookupResources } from "./data.ts";
+import { compactText } from "./utils.ts";
+import { fivetoolsSupports, lookupFivetools } from "./fivetools.ts";
+
+/**
+ * Public reference links for chat.
+ * Avoid 5thsrd.org — it often shows "Access Denied" (403) to normal browsers.
+ */
+export function lookupLink(kind: string, data: any): string {
+  // 5e.tools results carry their own 2014.5e.tools page.
+  if (data?._link) return String(data._link);
+  const index = String(data?.index ?? data?.name ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const nameQ = encodeURIComponent(String(data?.name ?? index));
+
+  // Hardcoded Free Rules chapter URLs (e.g. /sources/dnd/free-rules/combat) have started
+  // returning 403s as D&D Beyond has restructured that section. The public search URL
+  // below doesn't require login and hasn't shown the same 403 gate, so use it for everything.
+  if (kind === "rule" || kind === "rules") {
+    return `https://www.dndbeyond.com/search?q=${nameQ}`;
+  }
+  if (kind === "spell") return `https://www.dndbeyond.com/spells/${index}`;
+  if (kind === "item") return `https://www.dndbeyond.com/equipment/${index}`;
+  if (kind === "class") return `https://www.dndbeyond.com/classes/${index}`;
+  if (kind === "feat") return `https://www.dndbeyond.com/feats/${index}`;
+  if (kind === "race") return `https://www.dndbeyond.com/races/${index}`;
+  if (kind === "subrace") return `https://www.dndbeyond.com/search?q=${nameQ}`;
+  if (kind === "ability") return `https://www.dndbeyond.com/search?q=${nameQ}`;
+  return `https://www.dndbeyond.com/search?q=${nameQ}`;
+}
+
+function withLink(kind: string, data: any, text: string): string {
+  const link = lookupLink(kind, data);
+  // Put the link first so it's always visible even if chat truncates/splits the message
+  if (text.includes(link)) return text;
+  return `🔗 ${link} | ${text}`;
+}
+
+/** Per-request cap on the 5e API, so a slow API can't hang a chat reply. */
+const LOOKUP_TIMEOUT_MS = 6000;
+
+async function fetchDetail(url: string): Promise<any | null> {
+  const detail = await fetch(`https://www.dnd5eapi.co${url}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+  return detail.ok ? await detail.json() : null;
+}
+
+/** An exact-name hit from the API, or a way to fetch its closest partial match. */
+async function searchResource(
+  resource: string,
+  lookupQuery: string,
+): Promise<{ exact: any | null; fuzzy: () => Promise<any | null> }> {
+  const none = async () => null;
+  const normalized = lookupQuery
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ");
+  const slug = normalized.replace(/ /g, "-");
+  const base = `https://www.dnd5eapi.co/api/2014/${resource}`;
+  const direct = await fetch(`${base}/${encodeURIComponent(slug)}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+  if (direct.ok) return { exact: await direct.json(), fuzzy: none };
+  const res = await fetch(base, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+  if (!res.ok) return { exact: null, fuzzy: none };
+  const list = (await res.json()).results ?? [];
+  const comparable = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wanted = comparable(lookupQuery);
+  const exact = list.find((x: any) => comparable(x.name) === wanted);
+  if (exact) return { exact: await fetchDetail(exact.url), fuzzy: none };
+  const partial = list.find((x: any) => comparable(x.name).includes(wanted) || wanted.includes(comparable(x.name)));
+  return { exact: null, fuzzy: partial ? () => fetchDetail(partial.url) : none };
+}
+
+async function fetchFromResource(resource: string, lookupQuery: string): Promise<any | null> {
+  const hit = await searchResource(resource, lookupQuery);
+  return hit.exact ?? (await hit.fuzzy());
+}
+
+/**
+ * SRD and 5e.tools together. Exact names win over partial ones from either
+ * archive, so "goblin boss" finds 5e.tools' Goblin Boss rather than the SRD's
+ * Goblin. Throws only when dnd5eapi is down AND 5e.tools has nothing.
+ */
+async function fetchWithFivetools(kind: string, resource: string, lookupQuery: string): Promise<any | null> {
+  let apiError: unknown = null;
+  const [srd, tools] = await Promise.all([
+    searchResource(resource, lookupQuery).catch((e) => {
+      apiError = e;
+      return null;
+    }),
+    lookupFivetools(kind, lookupQuery),
+  ]);
+  if (srd?.exact) return srd.exact;
+  if (tools?.exact) return tools.exact;
+  const srdFuzzy = srd ? await srd.fuzzy().catch(() => null) : null;
+  const found = srdFuzzy ?? tools?.fuzzy ?? null;
+  if (!found && apiError) throw apiError;
+  return found;
+}
+
+export async function lookup5e(kind: string, query: string): Promise<any | null> {
+  const resource = lookupResources[kind];
+  if (!resource || !query || query.length > 60) return null;
+  const abilityAliases: Record<string, string> = {
+    strength: "str",
+    dexterity: "dex",
+    constitution: "con",
+    intelligence: "int",
+    wisdom: "wis",
+    charisma: "cha",
+  };
+  const lookupQuery = kind === "ability" ? (abilityAliases[query.toLowerCase().trim()] ?? query) : query;
+
+  // Rules: aliases + sections + chapters; expand chapter subsections for fuller answers
+  if (kind === "rule" || kind === "rules") {
+    const aliases: Record<string, string> = {
+      magic: "spellcasting",
+      spells: "spellcasting",
+      spell: "what-is-a-spell",
+      casting: "casting-a-spell",
+      concentration: "casting-a-spell",
+      combat: "combat",
+      attack: "making-an-attack",
+      attacks: "making-an-attack",
+      cover: "cover",
+      advantage: "advantage-and-disadvantage",
+      disadvantage: "advantage-and-disadvantage",
+      rest: "resting",
+      resting: "resting",
+      death: "damage-and-healing",
+      healing: "damage-and-healing",
+      damage: "damage-and-healing",
+      movement: "movement",
+      initiative: "the-order-of-combat",
+      surprise: "the-order-of-combat",
+    };
+    const q = lookupQuery.toLowerCase().trim();
+    const aliased = aliases[q] ?? lookupQuery;
+
+    let section = await fetchFromResource("rule-sections", aliased);
+    if (!section) section = await fetchFromResource("rule-sections", lookupQuery);
+    if (section) return { ...section, _kind: "rule-section" };
+
+    let chapter = await fetchFromResource("rules", aliased);
+    if (!chapter) chapter = await fetchFromResource("rules", lookupQuery);
+    if (chapter) {
+      const subs = Array.isArray(chapter.subsections) ? chapter.subsections.slice(0, 4) : [];
+      const expanded: string[] = [];
+      for (const sub of subs) {
+        try {
+          const res = await fetch(`https://www.dnd5eapi.co${sub.url}`);
+          if (res.ok) {
+            const detail = await res.json();
+            const d = String(detail.desc ?? "").replace(/#{1,6}\s*/g, "").replace(/\s+/g, " ").trim();
+            if (d) expanded.push(`${detail.name}: ${d.slice(0, 700)}`);
+          }
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return { ...chapter, _kind: "rule-chapter", _expanded: expanded };
+    }
+    return null;
+  }
+
+  if (fivetoolsSupports(kind)) return fetchWithFivetools(kind, resource, lookupQuery);
+  return fetchFromResource(resource, lookupQuery);
+}
+
+export function formatSpellSections(data: any, bonus: number | null = null) {
+  const upcast = bonus && bonus > 0 ? bonus : 0;
+  const baseSlot = data.level + upcast;
+  const slotDamage = data.damage?.damage_at_slot_level?.[String(baseSlot)];
+  const damage = data.damage
+    ? `${data.damage.damage_type?.name ?? "Damage"} ${
+        slotDamage
+          ? `at slot ${baseSlot}: ${slotDamage}`
+          : Object.entries(data.damage.damage_at_slot_level ?? {})
+              .map(([level, dice]) => `L${level}:${dice}`)
+              .join("/")
+      }`
+    : "no direct damage";
+  const saveStat = String(data.dc?.dc_type?.index ?? "").toLowerCase();
+  const dc = data.dc
+    ? `${data.dc.dc_type?.name ?? "save"} save (${data.dc.dc_success ?? "normal"})${/^(str|dex|con|int|wis|cha)$/.test(saveStat) ? ` — roll !save ${saveStat}` : ""}`
+    : "no save";
+  const area = data.area_of_effect
+    ? `${data.area_of_effect.size}-ft ${data.area_of_effect.type}`
+    : "not listed";
+  const components = (data.components ?? []).join("") || "none";
+  const material = data.material ? `; material: ${compactText(data.material, 80)}` : "";
+  const classes =
+    compactText((data.classes ?? []).map((x: any) => x.name).join(", "), 100) || "none listed";
+  const higher = data.higher_level?.length ? compactText(data.higher_level[0], 180) : "none";
+  const link = lookupLink("spell", data);
+  return [
+    `🔗 ${link} | ${data.name} Lv${data.level}${upcast ? ` (upcast +${upcast}, slot ${baseSlot})` : ""} ${data.school?.name ?? "magic"} | Cast: ${data.casting_time} | Range: ${data.range} | Duration: ${data.duration}${data.concentration ? " (concentration)" : ""}`,
+    `Components: ${components}${material} | Damage: ${damage} | Save: ${dc} | Area: ${area}`,
+    `Classes: ${classes} | Higher levels: ${higher}`,
+  ];
+}
+
+/** Monster lookup without its action text: name, type, AC, HP, CR, link. */
+export function formatMonsterBrief(data: any): string {
+  const ac = Array.isArray(data?.armor_class) ? data.armor_class[0]?.value ?? "?" : data?.armor_class ?? "?";
+  return `🔗 ${lookupLink("monster", data)} | ${data?.name ?? "?"}: ${data?.size ?? "?"} ${data?.type ?? "creature"} | AC ${ac} | HP ${data?.hit_points ?? "?"} | CR ${data?.challenge_rating ?? "?"} (XP ${data?.xp ?? "?"})`;
+}
+
+export function formatLookup(kind: string, data: any, bonus: number | null = null) {
+  const name = data.name;
+  const bonusText = bonus !== null ? `modifier +${bonus}; ` : "";
+  if (kind === "item" && data.rarity) {
+    // Magic item (5e.tools): rarity and rules text, plus weapon/armor stats if it has them.
+    const stats = [
+      data.damage ? `${data.damage.damage_dice ?? "?"} ${data.damage.damage_type?.name ?? "damage"}` : "",
+      data.armor_class?.base != null ? `AC ${data.armor_class.base}${data.armor_class.dex_bonus ? " + Dex" : ""}` : "",
+    ].filter(Boolean).join("; ");
+    const desc = compactText((data.desc ?? []).join(" "), 260);
+    return withLink(
+      kind,
+      data,
+      `${name}: ${bonusText}${data.rarity}${data.attunement ? ` (${data.attunement})` : ""}${stats ? `; ${stats}` : ""}${desc ? `; ${desc}` : ""}`,
+    );
+  }
+  if (kind === "item") {
+    const damage = data.damage
+      ? `${data.damage.damage_dice ?? "?"} ${data.damage.damage_type?.name ?? "damage"}`
+      : "no weapon damage";
+    const range =
+      data.range?.normal != null
+        ? data.range.long != null
+          ? `${data.range.normal}-${data.range.long} ft`
+          : `${data.range.normal} ft`
+        : "melee";
+    const props = compactText((data.properties ?? []).map((x: any) => x.name).join(", "), 90);
+    const ac = data.armor_category
+      ? `AC ${data.armor_class?.base ?? "?"}${data.armor_class?.dex_bonus ? "+ Dex" : ""}`
+      : "";
+    const itemParts = [
+      `${bonusText}${bonus !== null ? `attack/damage +${bonus}` : ""}`,
+      damage,
+      `range ${range}`,
+      ac,
+      `weight ${data.weight ?? "?"} lb`,
+      `cost ${data.cost?.quantity ?? "?"} ${data.cost?.unit ?? "gp"}`,
+      `properties ${props || "none"}`,
+    ].filter((part) => part.trim());
+    return withLink(kind, data, `${name}: ${itemParts.join("; ")}`);
+  }
+  if (kind === "class") {
+    const saves = (data.saving_throws ?? []).map((x: any) => x.name).join(", ") || "none listed";
+    const profs = compactText((data.proficiencies ?? []).map((x: any) => x.name).join(", "), 140);
+    return withLink(
+      kind,
+      data,
+      `${name}: ${bonusText}Hit Die d${data.hit_die}; saves ${saves}; proficiencies ${profs || "none listed"}`,
+    );
+  }
+  if (kind === "feat") {
+    const prereq = data._prereqText ??
+      ((data.prerequisites ?? [])
+        .map((x: any) => `${x.ability_score?.name ?? "ability"} ${x.minimum_score ?? "?"}`)
+        .join(", ") || "none listed");
+    return withLink(
+      kind,
+      data,
+      `${name}: ${bonusText}prerequisite ${prereq}; ${compactText((data.desc ?? []).join(" "), 220)}`,
+    );
+  }
+  if (kind === "ability") {
+    const skills = compactText((data.skills ?? []).map((x: any) => x.name).join(", "), 100);
+    return withLink(
+      kind,
+      data,
+      `${name}: ${bonusText}score ${data.full_name ?? name}; skills ${skills || "none listed"}; ${compactText((data.desc ?? []).join(" "), 180)}`,
+    );
+  }
+  if (kind === "race" || kind === "subrace") {
+    const bonuses =
+      (data.ability_bonuses ?? [])
+        .map(
+          (b: any) =>
+            `${b.ability_score?.name ?? b.ability_score?.index?.toUpperCase() ?? "ability"} +${b.bonus}`,
+        )
+        .join(", ") || "none listed";
+    const traits = compactText((data.traits ?? data.racial_traits ?? []).map((x: any) => x.name).join(", "));
+    const languages = compactText((data.languages ?? []).map((x: any) => x.name).join(", "), 80);
+    const parent = data.race?.name ? `; parent race ${data.race.name}` : "";
+    return withLink(
+      kind,
+      data,
+      `${name}: ${bonusText}bonuses ${bonuses}; speed ${data.speed ?? "?"} ft; size ${data.size ?? "?"}${parent}; languages ${languages || "not listed"}; traits ${traits || "none listed"}`,
+    );
+  }
+  if (kind === "monster") {
+    const acEntries = Array.isArray(data.armor_class) ? data.armor_class : [];
+    const ac = acEntries.length
+      ? `${acEntries[0].value ?? "?"}${acEntries[0].type ? ` (${acEntries[0].type})` : ""}`
+      : String(data.armor_class ?? "?");
+    const speed = Object.entries(data.speed ?? {})
+      .map(([mode, value]) => `${mode} ${value}`)
+      .join(", ") || "30 ft.";
+    const typeLine = `${data.size ?? "?"} ${data.type ?? "creature"}${data.alignment ? `, ${data.alignment}` : ""}`;
+    const actionsList = Array.isArray(data.actions) ? data.actions : [];
+    const actionText = actionsList.length
+      ? compactText(actionsList.map((a: any) => `${a.name}: ${a.desc}`).join(" | "), 200)
+      : "no notable actions listed";
+    return withLink(
+      kind,
+      data,
+      `${name}: ${typeLine} | AC ${ac} | HP ${data.hit_points ?? "?"} (${data.hit_dice ?? "?"}) | Speed ${speed} | CR ${data.challenge_rating ?? "?"} (XP ${data.xp ?? "?"}) | Actions: ${actionText}`,
+    );
+  }
+  if (kind === "rule" || kind === "rules") {
+    // Cap for 3 chat messages (~480 each, leave room for @user in outer send)
+    const MAX_RULE_CHARS = 1200;
+    const rawDesc = Array.isArray(data.desc) ? data.desc.join(" ") : String(data.desc ?? "");
+    const cleaned = rawDesc
+      .replace(/\|/g, " ")
+      .replace(/#{1,6}\s*/g, "")
+      .replace(/\n+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const link = lookupLink(kind, data);
+    if (Array.isArray(data._expanded) && data._expanded.length) {
+      const intro = cleaned.slice(0, 200);
+      const body = data._expanded.join(" || ");
+      return `🔗 ${link} | ${name}: ${intro} || ${body}`.slice(0, MAX_RULE_CHARS);
+    }
+
+    const body = cleaned.slice(0, MAX_RULE_CHARS - 80);
+    const subsections = Array.isArray(data.subsections)
+      ? data.subsections.map((s: any) => s.name).join(", ")
+      : "";
+    const subNote = subsections ? ` | Related: ${subsections}` : "";
+    return `🔗 ${link} | ${name}: ${body || "no description"}${subNote}`.slice(0, MAX_RULE_CHARS);
+  }
+  return withLink(kind, data, name);
+}
