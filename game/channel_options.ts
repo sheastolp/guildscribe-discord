@@ -54,6 +54,11 @@ const env = (name: string, fallback: number, min: number, max: number) => {
 };
 
 export const OPTIONS: OptionDef[] = [
+  // Bot replies (whisperme.ts)
+  { key: "replies.mode", bundle: "replies", label: "Answer viewers' !commands in", help: "auto = in chat while it's quiet, by whisper once chat gets busy (see the next option); whisper = always as a Twitch whisper (a private message only that viewer sees); chat = always in chat. A whisper Twitch refuses goes to chat. Viewers can pick for themselves either way with !whisperme on/off. Mods can switch it in chat with !whisperall auto/on/off.", kind: "word",
+    def: "auto", choices: ["auto", "chat", "whisper"], suggest: ["auto", "chat", "whisper"] },
+  { key: "replies.busyAt", bundle: "replies", label: "Auto: whisper once chat has this many messages a minute", help: "Viewers' messages in the last minute (bots and the bot's own replies don't count). Below this, auto answers in chat.", kind: "number", int: true,
+    def: 10, min: 2, max: 500, suggest: ["5", "10", "20", "40"] },
   // Gold & giveaways
   { key: "gold.perMessage", bundle: "gold", label: "Copper per chat message", kind: "number", int: true,
     def: env("POINTS_PER_MESSAGE", 1, 1, 1000), min: 1, max: 1000, suggest: ["1", "2", "5", "10"] },
@@ -81,6 +86,8 @@ export const OPTIONS: OptionDef[] = [
     def: env("RAID_MUSTER_SECONDS", 60, 15, 600), min: 15, max: 600, suggest: ["30s", "1m", "2m"] },
   { key: "raid.party", bundle: "raid", label: "Heroes per raid", kind: "number", int: true,
     def: env("RAID_PARTY_MAX", 6, 1, 20), min: 1, max: 20, suggest: ["4", "6", "10"] },
+  { key: "raid.partyDrag", bundle: "raid", label: "!rally brings the rallier's party", help: "on = a hero who types !rally drags every member of their !party (with a saved hero) into the raid too. Same as !rally partydrag on/off in chat.", kind: "word",
+    def: "on", choices: ["on", "off"], suggest: ["on", "off"] },
   { key: "raid.hp", bundle: "raid", label: "Boss toughness", help: "× a normal monster's HP; applies to the next boss posted.", kind: "multiplier",
     def: env("RAID_HP_MULTIPLIER", 5, 0.1, 20), min: 0.1, max: 20, suggest: ["2", "5", "8", "12"] },
   { key: "raid.loot", bundle: "raid", label: "Raid hoard", help: "× a normal monster's coin.", kind: "multiplier",
