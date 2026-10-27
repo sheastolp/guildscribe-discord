@@ -1,5 +1,5 @@
 {
-  "twitchCommit": "5bb3d0b",
+  "twitchCommit": "ec36b83",
   "files": [
     "abilities_cmd.ts",
     "askme.ts",
@@ -73,6 +73,7 @@
     "toa_monsters.ts",
     "types.ts",
     "utils.ts",
+    "websearch.ts",
     "wildshape.ts",
     "wildshape_form.ts",
     "wildshape_rules.ts",

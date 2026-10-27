@@ -1,5 +1,5 @@
 // !askme <question> — a straight, factual answer from an AI, based on
-// Wikipedia, with a link to the article it used.
+// Wikipedia, game wikis and a web search, with a link to the page it used.
 //
 //   !askme <question>         anyone — e.g. !askme how far away is the moon?
 //   !askme on|off|status      on/off: broadcaster or mods; status: anyone
@@ -10,10 +10,18 @@
 //     off and, when off, questions fall through to a channel's own !askme
 //     custom command.
 //   - No paid search: looks the question up on Wikipedia (search + full
-//     article text, no key), picks the few passages that best match the
-//     question, then the AI in openai.ts — Ollama or OpenAI, whichever the
+//     article text, no key) and on the web (DuckDuckGo, no key: websearch.ts
+//     reads the top few result pages), picks the few passages that best match
+//     the question, then the AI in openai.ts — Ollama or OpenAI, whichever the
 //     bot uses — answers from those passages only and names the one it used,
-//     whose article becomes the source link. Sending a handful of matching
+//     whose page becomes the source link. The web covers what Wikipedia
+//     doesn't: news, release dates, patches, prices. If one source is down,
+//     the other still answers. ASKME_WEB_SEARCH=off leaves the web out;
+//     ASKME_SEARCH_URL sends the searches through the Local AI search server
+//     instead of straight to DuckDuckGo (see websearch.ts).
+//   - ASKME_DEBUG=1 logs every lookup's passages and the AI's raw reply.
+//   - Thinking models answer without thinking first (think: false in
+//     openai.ts), and the AI gets ASKME_AI_TIMEOUT_S (default 90) to reply. Sending a handful of matching
 //     passages instead of whole intros keeps the prompt small (fast on a CPU
 //     Ollama) and puts the specific fact in front of the model. If the AI
 //     call fails, the best passage itself is posted. ASKME_MODEL picks the
@@ -31,7 +39,8 @@
 //   - Per-chatter cooldown (ASKME_USER_COOLDOWN_S, default 30 s, mods skip it)
 //     and a channel-wide one (ASKME_CHANNEL_COOLDOWN_S, default 5 s).
 
-import { OpenAI } from "./openai.ts";
+import { isReasoningModel, OpenAI } from "./openai.ts";
+import { mainContent, readPage, WEB_SEARCH_ON, webSearch } from "./websearch.ts";
 import { getChannelInfo, sendChatMessage } from "./twitch.ts";
 import { compactText } from "./utils.ts";
 import { isCommandGroupEnabled, recordMonitorEvent, setCommandGroupEnabled } from "./db.ts";
@@ -48,7 +57,14 @@ const MAX_ANSWER_LEN = 300;
 const MAX_URL_LEN = 120;
 const ARTICLES = 3;
 /** Passages handed to the AI, and the most characters each may have. */
-const PASSAGES = 6;
+const PASSAGES = 7;
+/** Of those, how many are kept for the best web passages. */
+const WEB_PASSAGES = 2;
+/** Web results looked at, and how many of their pages are read in full. */
+const WEB_RESULTS = 5;
+const WEB_PAGES = 3;
+// Sites already searched on their own (through their APIs).
+const SEARCHED_SITES = /(^|\.)(wikipedia\.org|fandom\.com)$/i;
 const MAX_PASSAGE_LEN = 400;
 /** Score added to game-wiki passages over Wikipedia's. */
 const GAME_WIKI_BONUS = 1.5;
@@ -59,16 +75,22 @@ const MIN_FALLBACK_COVERAGE = 0.6;
 // llama3.2 and the like stop after a sentence or two anyway.
 const ANSWER_MAX_TOKENS = 1000;
 const WIKI_TIMEOUT_MS = 8_000;
-const AI_TIMEOUT_MS = 45_000;
+// A laptop GPU can take a while, more so when Ollama has to load the model first.
+const AI_TIMEOUT_MS = Math.max(10, Number(Deno.env.get("ASKME_AI_TIMEOUT_S") ?? "90")) * 1000;
+// ASKME_DEBUG=1 logs each question's lookup and the AI's raw reply, to see
+// why an answer came out wrong or not at all.
+const DEBUG = /^(1|true|yes|on)$/i.test(Deno.env.get("ASKME_DEBUG") ?? "");
+const debug = (...args: unknown[]) => DEBUG && console.log("askme debug:", ...args);
 const USER_COOLDOWN_MS = Math.max(0, Number(Deno.env.get("ASKME_USER_COOLDOWN_S") ?? "30")) * 1000;
 const CHANNEL_COOLDOWN_MS = Math.max(0, Number(Deno.env.get("ASKME_CHANNEL_COOLDOWN_S") ?? "5")) * 1000;
 
 const SYSTEM_PROMPT = [
-  `You answer questions from viewers in a Twitch chat, using ONLY the numbered Wikipedia passages you are given.`,
+  `You answer questions from viewers in a Twitch chat, using ONLY the numbered passages you are given, from Wikipedia, game wikis and web pages.`,
   `Answer exactly what was asked: if they ask for a number, name, date, place or yes/no, give that specific fact first. Don't summarize the topic or add background they didn't ask for.`,
   `Reply in plain text, one or two short sentences (under ${MAX_ANSWER_LEN} characters), then the number of the passage you used in brackets, e.g. "The Moon is about 384,400 km from Earth on average. [2]". No markdown, no links.`,
   `Passages can be about different things with similar names — a game and its sequel, spin-off or remake, a film, a book. Use only passages about exactly the thing asked about, and never mix facts from one into another.`,
   `You may be told which game the stream is playing: "this game" means that game, and you can use that note to say what game is being played.`,
+  `If passages disagree, trust the most recent, most official-looking one. Web pages can be ads, forums or out of date: prefer the passages that state the fact plainly.`,
   `If the passages don't contain the answer, say you couldn't find it — never guess or add facts that aren't in them.`,
   `Keep it family-friendly. If a question asks for something harmful, hateful, sexual, or someone's private personal information, politely decline in one sentence.`,
 ].join(" ");
@@ -80,8 +102,9 @@ interface Article {
   title: string;
   url: string;
   text: string;
-  /** Where it's from, for the source line: "Wikipedia" or a game wiki's name. */
+  /** Where it's from, for the source line: "Wikipedia", a game wiki's name or a website. */
   site: string;
+  kind: "wikipedia" | "gamewiki" | "web";
 }
 
 interface Passage {
@@ -253,7 +276,7 @@ async function searchWikipedia(question: string, game: boolean, games: string[])
       const data = await wikiQuery({ prop: "extracts|info", explaintext: "1", inprop: "url", titles: title, redirects: "1" });
       const page = data.query?.pages?.[0];
       return page?.extract?.trim()
-        ? { article: { title: page.title, url: page.fullurl, text: page.extract, site: "Wikipedia" } as Article, rank }
+        ? { article: { title: page.title, url: page.fullurl, text: page.extract, site: "Wikipedia", kind: "wikipedia" } as Article, rank }
         : null;
     } catch {
       return null; // one missing article shouldn't sink the others
@@ -400,7 +423,7 @@ async function searchGameWiki(question: string, game: string): Promise<{ article
         const page = (await fandomQuery(wiki.url, { action: "parse", page: title, prop: "text", redirects: "1", disabletoc: "1" })).parse;
         const text = htmlToText(String(page?.text ?? "")).trim();
         const url = `${wiki.url}/wiki/${encodeURIComponent(String(page.title).replace(/ /g, "_"))}`;
-        return text ? { article: { title: page.title, url, text, site: wiki.name } as Article, rank } : null;
+        return text ? { article: { title: page.title, url, text, site: wiki.name, kind: "gamewiki" } as Article, rank } : null;
       } catch {
         return null;
       }
@@ -408,6 +431,30 @@ async function searchGameWiki(question: string, game: string): Promise<{ article
     return pages.filter((p) => p !== null);
   } catch (e) {
     console.error("askme game wiki lookup failed", e);
+    return [];
+  }
+}
+
+/** The top web results for `query`, as articles: the first few pages read in
+ * full, each led by its search snippet (the bit DuckDuckGo matched to the
+ * question), and the rest as just their snippet. Wikipedia and Fandom are
+ * left out, as they're searched on their own. Never throws: no web is fine. */
+async function searchWeb(query: string): Promise<{ article: Article; rank: number }[]> {
+  if (!WEB_SEARCH_ON) return [];
+  try {
+    const results = (await webSearch(query, WEB_RESULTS + 3))
+      .filter((r) => { try { return !SEARCHED_SITES.test(new URL(r.url).hostname); } catch { return false; } })
+      .slice(0, WEB_RESULTS);
+    const pages = await Promise.all(results.map(async (r, rank) => {
+      const html = rank < WEB_PAGES ? await readPage(r.url) : null;
+      const body = html ? htmlToText(mainContent(html)).trim() : "";
+      const text = [r.snippet, body].filter(Boolean).join("\n");
+      const site = new URL(r.url).hostname.replace(/^www\./, "");
+      return text ? { article: { title: r.title || site, url: r.url, text, site, kind: "web" } as Article, rank } : null;
+    }));
+    return pages.filter((p) => p !== null);
+  } catch (e) {
+    console.error("askme web search failed", e);
     return [];
   }
 }
@@ -493,24 +540,37 @@ function bestPassages(question: string, articles: { article: Article; rank: numb
     if (numeric && HAS_NUMBER.test(p.text)) s += 1;
     if (p.lead) s += 0.5;
     // A game wiki page was searched for this exact game, so it's on topic.
-    if (p.article.site !== "Wikipedia") s += GAME_WIKI_BONUS;
+    if (p.article.kind === "gamewiki") s += GAME_WIKI_BONUS;
     return s + (titles.get(p.article.title) ?? 0) - p.rank * 0.5;
   };
   const ranked = all.map((p) => ({ p, s: score(p) })).sort((a, b) => b.s - a.s);
-  const intros = ranked.filter(({ p }) => p.lead).slice(0, 2);
-  const rest = ranked.filter(({ p }) => !p.lead).slice(0, PASSAGES - intros.length);
-  return [...intros, ...rest].sort((a, b) => b.s - a.s).map(({ p }) => p);
+  // Web pages' openings are menus as often as summaries, so they get their
+  // own places instead of competing for the lead ones.
+  const web = ranked.filter(({ p }) => p.article.kind === "web").slice(0, WEB_PASSAGES);
+  const intros = ranked.filter(({ p }) => p.lead && p.article.kind !== "web").slice(0, 2);
+  const picked = new Set([...web, ...intros]);
+  const rest = ranked.filter((x) => !picked.has(x) && !(x.p.lead && x.p.article.kind !== "web")).slice(0, PASSAGES - picked.size);
+  return [...picked, ...rest].sort((a, b) => b.s - a.s).map(({ p }) => p);
 }
 
-/** The passages the AI answers `query` from: Wikipedia's, plus the wiki of
- * any game the question names. (Exported for testing.) */
+/** The passages the AI answers `query` from: Wikipedia's, the wiki of any
+ * game the question names, and the web's. Wikipedia being down only throws
+ * if the web found nothing either. (Exported for testing.) */
 export async function findPassages(query: string, games: string[], game: boolean): Promise<Passage[]> {
-  const wikipedia = await searchWikipedia(query, game, games);
+  let wikiError: unknown = null;
+  const [wikipedia, web] = await Promise.all([
+    searchWikipedia(query, game, games).catch((e) => (wikiError = e, [])),
+    searchWeb(query),
+  ]);
+  if (wikiError) {
+    if (!web.length) throw wikiError;
+    console.error("askme Wikipedia lookup failed", wikiError);
+  }
   const gameWiki = (await Promise.all((await gamesAsked(query, games, wikipedia, game)).map((g) => searchGameWiki(query, g)))).flat();
-  return bestPassages(query, [...gameWiki, ...wikipedia], game);
+  return bestPassages(query, [...gameWiki, ...wikipedia, ...web], game);
 }
 
-/** Looks `question` up on Wikipedia and has the AI answer from what it finds. */
+/** Looks `question` up on Wikipedia and the web, and has the AI answer from what it finds. */
 async function answerQuestion(broadcasterId: string, question: string): Promise<Answer | null> {
   const currentGame = await currentGameOf(broadcasterId);
   const { text: query, games } = expandQuestion(question, currentGame);
@@ -519,27 +579,47 @@ async function answerQuestion(broadcasterId: string, question: string): Promise<
   try {
     passages = await findPassages(query, games, game);
   } catch (e) {
-    console.error("askme Wikipedia lookup failed", e);
+    console.error("askme lookup failed", e);
     await recordMonitorEvent("askme_error", `${broadcasterId}: ${String(e)}`);
     return null;
   }
+  debug(`"${question}" → searched as "${query}"${games.length ? ` (games: ${games.join(", ")})` : ""}`);
+  debug(`${passages.length} passages:\n` + passages.map((p, i) => `  [${i + 1}] ${p.article.kind} · ${p.article.site} · ${p.article.title}: ${p.text.slice(0, 160)}`).join("\n"));
   if (!passages.length) return null;
 
   try {
+    // The date, so "latest" and "when is…" are answered from the right side of it.
+    const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
     const excerpts = passages.map((p, i) => `[${i + 1}] (${p.article.site}: ${p.article.title}) ${p.text}`).join("\n\n");
     // No `temperature` override: some OpenAI models only accept the default.
-    const completion = await openai.chat.completions.create({
+    const ask = (retry: boolean) => openai.chat.completions.create({
       model: MODEL,
       max_completion_tokens: ANSWER_MAX_TOKENS,
+      // Answering from passages needs no thinking, and on Ollama it's the slow part.
+      think: false,
+      // The second try, after the model got stuck repeating itself, is
+      // steered away from repeating (reasoning models don't take these).
+      ...(retry && !isReasoningModel(MODEL) ? { frequency_penalty: 0.6, presence_penalty: 0.3 } : {}),
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Passages:\n\n${excerpts}\n\n${currentGame ? `(The stream is playing ${currentGame}.)\n` : ""}Question: ${query}`,
+          content: `Passages:\n\n${excerpts}\n\n(Today is ${today}.)\n${currentGame ? `(The stream is playing ${currentGame}.)\n` : ""}Question: ${query}`,
         },
       ],
     }, { timeoutMs: AI_TIMEOUT_MS });
+    let completion;
+    try {
+      completion = await ask(false);
+    } catch (e) {
+      // Ollama aborts a reply that loops on the same words ("token repeat
+      // limit reached", HTTP 500); one more go usually comes out fine.
+      if (!/HTTP 5\d\d/.test(String(e))) throw e;
+      console.warn("askme AI answer failed, trying once more:", String(e).slice(0, 200));
+      completion = await ask(true);
+    }
     const raw = String(completion.choices?.[0]?.message?.content ?? "");
+    debug(`AI replied: ${JSON.stringify(raw)}`);
     // The passage it cited; the best-matching one if it didn't say.
     const cited = Number(raw.match(/\[(\d)\]/)?.[1] ?? 0);
     const article = (passages[cited - 1] ?? passages[0]).article;
@@ -554,13 +634,18 @@ async function answerQuestion(broadcasterId: string, question: string): Promise<
     console.error("askme AI answer failed", e);
     await recordMonitorEvent("askme_error", `${broadcasterId}: ${String(e)}`);
   }
-  // The AI is down or said nothing: let the best passage speak for itself —
-  // but only if it covers most of what was asked, so an unrelated paragraph
-  // isn't posted as the answer.
-  const top = passages[0];
+  // The AI is down or said nothing: let a passage speak for itself — the one
+  // that covers the most of what was asked (the best-ranked of those), and
+  // only if it covers most of it, so an unrelated paragraph isn't posted as
+  // the answer.
   const wanted = [...keywords(query)];
-  const covered = wanted.filter((w) => top.words.has(w) || keywords(top.article.title).has(w)).length;
-  if (!wanted.length || covered / wanted.length < MIN_FALLBACK_COVERAGE) return null;
+  if (!wanted.length) return null;
+  const coverage = (p: Passage) => {
+    const title = keywords(p.article.title);
+    return wanted.filter((w) => p.words.has(w) || title.has(w)).length / wanted.length;
+  };
+  const top = passages.reduce((best, p) => coverage(p) > coverage(best) ? p : best);
+  if (coverage(top) < MIN_FALLBACK_COVERAGE) return null;
   return {
     text: fitSentences(top.text, MAX_ANSWER_LEN),
     source: { url: top.article.url, title: top.article.title, site: top.article.site },
