@@ -1,5 +1,5 @@
 {
-  "twitchCommit": "ec36b83",
+  "twitchCommit": "ea881fe",
   "files": [
     "abilities_cmd.ts",
     "askme.ts",
@@ -59,6 +59,7 @@
     "narration.ts",
     "openai.ts",
     "oracle.ts",
+    "party_names.ts",
     "peddler_guard.ts",
     "points.ts",
     "points_db.ts",
