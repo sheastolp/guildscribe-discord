@@ -30,6 +30,10 @@ export async function sendWhisperParts(toUserId: string, parts: string[]): Promi
 
 /** Chat summary for a long fight: who fought whom, how it ended, and
  * the loot won ("none" when there was none, e.g. PvP or a loss). */
+/** Twitch-only: whispering replies when chat is quiet or busy. Discord
+ * always answers in the channel, so there's nothing to switch. */
+export function setWhisperReplies(_mode: unknown, _opts?: unknown) {}
+
 export function fightSummary(f: { fighter: string; enemy: string; outcome: string; loot?: string; hp?: string }): string {
   return `⚔️ ${f.fighter} vs ${f.enemy} — ${f.outcome}${f.hp ? ` ❤️ HP left: ${f.hp}.` : ""} 🪙 Loot: ${f.loot || "none"}.`;
 }
