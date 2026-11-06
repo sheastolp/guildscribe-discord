@@ -55,9 +55,11 @@ const env = (name: string, fallback: number, min: number, max: number) => {
 
 export const OPTIONS: OptionDef[] = [
   // Bot replies (whisperme.ts)
-  { key: "replies.mode", bundle: "replies", label: "Answer viewers' !commands in", help: "auto = in chat while it's quiet, by whisper once chat gets busy (see the next option); whisper = always as a Twitch whisper (a private message only that viewer sees); chat = always in chat. A whisper Twitch refuses goes to chat. Viewers can pick for themselves either way with !whisperme on/off. Mods can switch it in chat with !whisperall auto/on/off.", kind: "word",
+  { key: "replies.mode", bundle: "replies", label: "Answer viewers' !commands in", help: "auto = in chat at a normal pace, by whisper while chat is quiet or busy (see the next two options); whisper = always as a Twitch whisper (a private message only that viewer sees); chat = always in chat. A whisper Twitch refuses goes to chat. Viewers can pick for themselves either way with !whisperme on/off. Mods can switch it in chat with !whisperall auto/on/off.", kind: "word",
     def: "auto", choices: ["auto", "chat", "whisper"], suggest: ["auto", "chat", "whisper"] },
-  { key: "replies.busyAt", bundle: "replies", label: "Auto: whisper once chat has this many messages a minute", help: "Viewers' messages in the last minute (bots and the bot's own replies don't count). Below this, auto answers in chat.", kind: "number", int: true,
+  { key: "replies.quietBelow", bundle: "replies", label: "Auto: whisper while chat has fewer than this many messages a minute", help: "Viewers' messages in the last minute (bots and the bot's own replies don't count). From this up to the next option, auto answers in chat. 0 = never whisper a quiet chat.", kind: "number", int: true,
+    def: 5, min: 0, max: 500, suggest: ["off", "3", "5", "10"] },
+  { key: "replies.busyAt", bundle: "replies", label: "Auto: whisper once chat has more than this many messages a minute", help: "Viewers' messages in the last minute (bots and the bot's own replies don't count). Up to this (from the option above), auto answers in chat.", kind: "number", int: true,
     def: 10, min: 2, max: 500, suggest: ["5", "10", "20", "40"] },
   // Gold & giveaways
   { key: "gold.perMessage", bundle: "gold", label: "Copper per chat message", kind: "number", int: true,
@@ -75,7 +77,7 @@ export const OPTIONS: OptionDef[] = [
     def: env("HUNT_LOOT_MULTIPLIER", 1, 0, 100), min: 0, max: 100, suggest: ["0", "0.5", "1", "2", "3"] },
   { key: "autohunt.max", bundle: "fighting", label: "Heroes out on !autohunt at once", kind: "number", int: true,
     def: env("AUTOHUNT_MAX_ACTIVE", 10, 1, 50), min: 1, max: 50, suggest: ["5", "10", "20"] },
-  { key: "autohunt.reports", bundle: "fighting", label: "Autohunt progress reports", help: "whisper = only whispered to each hunter, never posted in chat; chat = in-chat summary.", kind: "word",
+  { key: "autohunt.reports", bundle: "fighting", label: "Autohunt progress reports", help: "whisper = one whisper to each hunter when their trip ends, with a link to the full report (never posted in chat); chat = in-chat summary as bouts are settled.", kind: "word",
     def: "whisper", choices: ["whisper", "chat"], suggest: ["whisper", "chat"] },
   // Raid boss
   { key: "raid.cooldown", bundle: "raid", label: "Time between raids", help: "Same as !rally cooldown in chat.", kind: "duration", unit: "m",
@@ -85,7 +87,7 @@ export const OPTIONS: OptionDef[] = [
   { key: "raid.muster", bundle: "raid", label: "Time to join before the raid charges", kind: "duration", unit: "s",
     def: env("RAID_MUSTER_SECONDS", 60, 15, 600), min: 15, max: 600, suggest: ["30s", "1m", "2m"] },
   { key: "raid.party", bundle: "raid", label: "Heroes per raid", kind: "number", int: true,
-    def: env("RAID_PARTY_MAX", 6, 1, 20), min: 1, max: 20, suggest: ["4", "6", "10"] },
+    def: env("RAID_PARTY_MAX", 9, 1, 20), min: 1, max: 20, suggest: ["6", "9", "12"] },
   { key: "raid.partyDrag", bundle: "raid", label: "!rally brings the rallier's party", help: "on = a hero who types !rally drags every member of their !party (with a saved hero) into the raid too. Same as !rally partydrag on/off in chat.", kind: "word",
     def: "on", choices: ["on", "off"], suggest: ["on", "off"] },
   { key: "raid.hp", bundle: "raid", label: "Boss toughness", help: "× a normal monster's HP; applies to the next boss posted.", kind: "multiplier",
