@@ -7,6 +7,7 @@
 // and whispers don't apply: Discord replies are split by the Discord layer.
 
 import { deliver } from "./scope.ts";
+import { getReplyInitiator } from "./whisper.ts";
 
 export const env = (name: string) => {
   const value = Deno.env.get(name);
@@ -14,8 +15,17 @@ export const env = (name: string) => {
   return value;
 };
 
-export async function sendChatMessage(text: string, broadcasterId: string, _names: string[] = [], _opts?: { log?: boolean; keepNames?: boolean }) {
+export async function sendChatMessage(text: string, broadcasterId: string, _names: string[] = [], _opts?: { log?: boolean; keepNames?: boolean; whisper?: boolean }) {
   return await deliver(broadcasterId, { text });
+}
+
+/** After a reply went to the member by DM (whisper.ts's shim sends a Twitch
+ * "whisper" as a DM), says so in the command's reply, as the Twitch bot says
+ * "check your whispers" in chat, so the DM isn't mistaken for no reply. */
+export async function noteWhisperSent(broadcasterId: string) {
+  const i = getReplyInitiator();
+  if (!i || i.broadcasterId !== broadcasterId) return;
+  await deliver(broadcasterId, { text: `@${i.display} 📬 I've sent you my reply by DM.` });
 }
 
 export async function sendChatMessages(
