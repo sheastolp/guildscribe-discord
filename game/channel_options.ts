@@ -118,6 +118,12 @@ export const OPTIONS: OptionDef[] = [
   // Shot counter (shots.ts) — dashboard only, no chat command changes it.
   { key: "shots.word", bundle: "shots", label: "What's being counted", help: "One word, singular. The commands follow it (drink → !drink adds one, !drinks shows the count), and chat and the overlay say e.g. \"3 drinks\".", kind: "word",
     def: "shot", validate: (w) => shotWordProblem(w), suggest: ["shot", "drink", "sip", "beer", "chug"] },
+  { key: "shots.titleWord", bundle: "shots", label: "Turn on by itself when the stream title has the word", help: "e.g. drunk → a title like \"drunk hollow knight\" turns the counter on when you go live (and if you change the title mid-stream), and it goes back off when the title stops saying it. Turning the counter on or off by hand wins for the rest of that stream. Whole word only. off = never by itself.", kind: "word",
+    def: "drunk", suggest: ["drunk", "drinking", "shots", "off"] },
+  { key: "shots.hydrate", bundle: "shots", label: "Remind you to drink water every", help: "While you're live with the shot counter on, GuildScribe reminds you in chat to hydrate with water or anything non-alcoholic (mentioning your count once there is one). The first reminder comes this long into the stream. A channel-point reward with \"hydrate\" in its title restarts the timer. off = no reminders.", kind: "duration", unit: "m",
+    def: 1800, min: 0, max: 14_400, suggest: ["off", "20m", "30m", "45m", "1h"] },
+  { key: "shots.listen", bundle: "shots", label: "Add one when you say \"that was stupid\", \"I'm stupid\" or \"that was worthy of one\"", help: "on = GuildScribe listens to your live stream's audio (like UndercoverBurn does), adds one each time it hears one of those phrases, and says so in chat. What it heard shows on the dashboard's 🎙 Listening log (kept in memory, cleared on restart, never saved). Only while you're live and the shot counter is on.", kind: "word",
+    def: "off", choices: ["on", "off"], suggest: ["on", "off"] },
   // Song requests (songrequests.ts); mods skip every limit but "who".
   { key: "songs.who", bundle: "songrequests", label: "Who can request songs", help: "subs = subscribers, VIPs and mods.", kind: "word",
     def: "everyone", choices: ["everyone", "subs", "vips", "mods"], suggest: ["everyone", "subs", "vips", "mods"] },
@@ -316,6 +322,13 @@ async function writeOption(broadcasterId: string, o: OptionDef, value: string | 
     );
   }
   cache.delete(broadcasterId);
+}
+
+/** Sets one option from a chat command (value already valid; null = default). */
+export async function setOptionValue(broadcasterId: string, key: string, value: string | null) {
+  const o = BY_KEY.get(key);
+  if (!o) throw new Error(`unknown option ${key}`);
+  await writeOption(broadcasterId, o, value);
 }
 
 /** Forget a channel's cached options (after a chat command changed one). */
