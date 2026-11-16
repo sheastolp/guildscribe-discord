@@ -48,6 +48,7 @@ import { recordBattle } from "./battle_log.ts";
 import { simulateMonsterFight } from "./battle.ts";
 import { awardMonsterXp } from "./characters.ts";
 import { awardMonsterLoot, lootSummary, soloLootNote } from "./loot.ts";
+import { wowLootNote } from "./wow_loot.ts";
 import { claimHunt, waitText } from "./huntcooldown.ts";
 import { fightSummary, hpLeft } from "./whisper.ts";
 import { duelNarration } from "./narration.ts";
@@ -55,7 +56,7 @@ import { withArticle } from "./combat_shared.ts";
 import { applyGear, effectText, ownsGear } from "./gear.ts";
 import { formatCoins } from "./coins.ts";
 import { adjustBalance, canEarnGold, getBalance, isPointsEnabled, trySpend } from "./points_db.ts";
-import { formatRaceName, heroAc, pick } from "./utils.ts";
+import { heroTitle, heroAc, pick } from "./utils.ts";
 import type { Character } from "./types.ts";
 import {
   type Bounty,
@@ -155,7 +156,7 @@ function lore(o: ResolvedOffer): string {
 
 function sheetLine(c: Character, name: string, coin: number | null): string {
   const ac = heroAc(c, 11).ac;
-  return `${name} — Lv ${c.level} ${formatRaceName(c.race, c.subrace)} ${c.cls} | ${c.hpMax} HP | AC ${ac} | XP ${c.xp ?? 0}` +
+  return `${name} — Lv ${c.level} ${heroTitle(c)} | ${c.hpMax} HP | AC ${ac} | XP ${c.xp ?? 0}` +
     (coin !== null ? ` | 🪙 ${formatCoins(coin)}` : "") + ` | ${plural((c.items ?? []).length, "item")} on the sheet`;
 }
 
@@ -223,7 +224,7 @@ export async function handleHoardCommand(
 
     case "hunt": {
       if (!c) return say(noHero).then(() => true);
-      const monster = await summonMonster(broadcasterId, c.level, arg || null);
+      const monster = await summonMonster(broadcasterId, c.level, arg || null, { azeroth: !!c.wow });
       if (!monster) {
         await say(`no quarry known as "${arg}". Check !bounties for the board, !bestiary for every huntable monster, or !hunt with no name and let fate pick.`);
         return true;
@@ -242,7 +243,7 @@ export async function handleHoardCommand(
         const xp = await awardMonsterXp(chatter, monster.cr, broadcasterId);
         if (xp) rewards += ` +${xp.gained} XP${xp.leveledTo ? ` — 🎉 leveled up to ${xp.leveledTo}!` : ""}`;
         const paid = await awardMonsterLoot([chatter], monster.cr, broadcasterId);
-        rewards += soloLootNote(paid);
+        rewards += soloLootNote(paid) + await wowLootNote(broadcasterId, chatter, monster.name, monster.cr, monster.crValue);
         loot = lootSummary(paid);
         bounty = await creditBounty(broadcasterId, chatter, monster.name, p);
         await savePlayer(broadcasterId, chatter, p);

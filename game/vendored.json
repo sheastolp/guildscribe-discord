@@ -1,5 +1,5 @@
 {
-  "twitchCommit": "6dc99d0",
+  "twitchCommit": "be89db3",
   "files": [
     "abilities_cmd.ts",
     "askme.ts",
@@ -80,6 +80,10 @@
     "wildshape.ts",
     "wildshape_form.ts",
     "wildshape_rules.ts",
-    "wow_forever.ts"
+    "wow_data.ts",
+    "wow_factionwar.ts",
+    "wow_forever.ts",
+    "wow_loot.ts",
+    "wow_monsters.ts"
   ]
 }

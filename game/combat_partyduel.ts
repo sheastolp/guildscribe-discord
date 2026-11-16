@@ -14,6 +14,7 @@ import { takePartyName } from "./party_names.ts";
 import { sendChatMessage, sendChatMessages } from "./twitch.ts";
 import { awardMonsterXp } from "./characters.ts";
 import { awardMonsterLoot, lootSummary, partyLootNote } from "./loot.ts";
+import { wowGroupLootNote } from "./wow_loot.ts";
 import { fightSummary, hpLeft } from "./whisper.ts";
 import { claimHunt } from "./huntcooldown.ts";
 import { creditBounty } from "./hoard.ts";
@@ -168,13 +169,10 @@ export async function handlePartyDuelCommand(
             if (xp) xpNotes.push(`${n}+${xp.gained}`);
           }
         }
+        const survivors = partyHunt.members.filter((n: string) => (partyHunt.member_hp[n] ?? 0) > 0);
         const lootNote = partyLootNote(
-          await awardMonsterLoot(
-            partyHunt.members.filter((n: string) => (partyHunt.member_hp[n] ?? 0) > 0),
-            String(partyHunt.monster_cr),
-            broadcasterId,
-          ),
-        );
+          await awardMonsterLoot(survivors, String(partyHunt.monster_cr), broadcasterId),
+        ) + await wowGroupLootNote(broadcasterId, survivors, String(partyHunt.monster_name), String(partyHunt.monster_cr));
         let bountyNote = "";
         for (const n of partyHunt.members) {
           if ((partyHunt.member_hp[n] ?? 0) > 0) bountyNote ||= await creditBounty(broadcasterId, n, String(partyHunt.monster_name));
@@ -324,7 +322,9 @@ export async function handlePartyDuelCommand(
     // target is scaled to the party's average level the same way a random
     // pick is; the group-size tweak below applies to both.
     // From the channel's live bestiary, level-scaled then adapted (bestiary.ts).
-    const summoned = await summonMonster(broadcasterId, avgLevel, namedBase ? namedBase.name : null);
+    const summoned = await summonMonster(broadcasterId, avgLevel, namedBase ? namedBase.name : null, {
+      azeroth: livingMembers.some((n) => chars[n].wow),
+    });
     if (!summoned) return true; // unreachable: namedBase was just resolved
     const monster = summoned;
     const sizeScale = 0.5 + livingMembers.length * 0.22; // 1p~0.72, 2p~0.94, 3p~1.16
@@ -382,7 +382,8 @@ export async function handlePartyDuelCommand(
           }
         }
         const paid = await awardMonsterLoot(livingMembers.filter((n) => hp[n] > 0), monster.cr, broadcasterId);
-        lootNote = partyLootNote(paid);
+        lootNote = partyLootNote(paid) +
+          await wowGroupLootNote(broadcasterId, livingMembers.filter((n) => hp[n] > 0), monster.name, monster.cr, monster.crValue);
         loot = lootSummary(paid);
         for (const n of livingMembers) if (hp[n] > 0) bountyNote ||= await creditBounty(broadcasterId, n, monster.name);
       }
